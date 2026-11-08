@@ -1,25 +1,17 @@
 // ATTACH options: bridge, app_key (secret), transactional.
 //
-// The validator packs the supplied values into attach_opaque_data, which DuckDB
-// hands back on every call (sealed by the SDK over HTTP). Functions read it
-// from BindParams.AttachOpaqueData (bind) or ProcessParams.AttachScope (process),
-// and the transaction hooks from TransactionHookContext.AttachOpaqueData.
+// Functions and the transaction hooks read them with the SDK's AttachOptions()
+// accessor (ProcessParams / TransactionHookContext). The SDK keeps the options
+// in the attach value, with app_key encrypted under a key the client never has.
 
 package hue
 
 import (
-	"bytes"
-	"encoding/json"
-
 	"github.com/Query-farm/vgi-go/vgi"
 	"github.com/Query-farm/vgi-rpc-go/vgirpc"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 )
-
-// attachMagic opens our attach plaintext. It starts with the catalog name and
-// a NUL (the SDK's catalogNameOf convention) so catalog-scoped lookups work.
-var attachMagic = []byte(CatalogName + "\x00hue1:")
 
 func attachOptionSpecs() []vgi.AttachOptionSpec {
 	b := array.NewBooleanBuilder(mem)
@@ -41,60 +33,35 @@ func attachOptionSpecs() []vgi.AttachOptionSpec {
 	}
 }
 
-// encodeAttachOptions packs the ATTACH options batch into attach_opaque_data.
-func encodeAttachOptions(optionsIPC []byte) ([]byte, BridgeOptions, error) {
+// optionsOf reads the ATTACH options through the SDK's accessor. app_key is
+// declared Secret: the SDK carries it encrypted inside the attach value and
+// decrypts it only here, so it never appears in attach bytes, bind opaque data
+// or function state.
+func optionsOf(o *vgi.AttachOptions) BridgeOptions {
 	var opts BridgeOptions
-	if len(optionsIPC) > 0 {
-		batch, err := vgi.DeserializeRecordBatch(optionsIPC)
-		if err != nil {
-			return nil, opts, err
-		}
-		defer batch.Release()
-		if batch.NumRows() > 0 {
-			if c := column0(batch, "bridge"); c != nil {
-				if s, ok := cellValue(c, 0).(string); ok {
-					opts.Bridge = s
-				}
-			}
-			if c := column0(batch, "app_key"); c != nil {
-				if s, ok := cellValue(c, 0).(string); ok {
-					opts.AppKey = s
-				}
-			}
-			if c := column0(batch, "transactional"); c != nil {
-				opts.Transactional, _ = cellValue(c, 0).(bool)
-			}
-		}
-	}
-	data, err := json.Marshal(opts)
-	if err != nil {
-		return nil, opts, err
-	}
-	return append(append([]byte(nil), attachMagic...), data...), opts, nil
-}
-
-// decodeAttachOptions unpacks attach_opaque_data; anything else means "no options".
-func decodeAttachOptions(b []byte) BridgeOptions {
-	var opts BridgeOptions
-	if i := bytes.Index(b, attachMagic); i >= 0 {
-		_ = json.Unmarshal(b[i+len(attachMagic):], &opts)
-	}
+	opts.Bridge, _ = o.String("bridge")
+	opts.AppKey, _ = o.String("app_key")
+	opts.Transactional, _ = o.Bool("transactional")
 	return opts
 }
 
+// attachValidator decides supports_transactions per attach from the
+// transactional option; it stores nothing in the attach value.
 func attachValidator(req *vgi.CatalogAttachRequestWire, _ *vgirpc.CallContext) (*vgi.AttachDecision, error) {
-	var optionsIPC []byte
-	if req.Options != nil {
-		optionsIPC = *req.Options
+	transactional := false
+	if req.Options != nil && len(*req.Options) > 0 {
+		batch, err := vgi.DeserializeRecordBatch(*req.Options)
+		if err != nil {
+			return nil, err
+		}
+		defer batch.Release()
+		if c := column0(batch, "transactional"); c != nil && batch.NumRows() > 0 {
+			transactional, _ = cellValue(c, 0).(bool)
+		}
 	}
-	data, opts, err := encodeAttachOptions(optionsIPC)
-	if err != nil {
-		return nil, err
-	}
-	// supports_transactions per attach: only a transactional attach gets
-	// BEGIN/COMMIT/ROLLBACK (the transaction hooks) and a transaction id.
-	transactional := opts.Transactional
-	return &vgi.AttachDecision{AttachOpaqueData: data, SupportsTransactions: &transactional}, nil
+	// Only a transactional attach gets BEGIN/COMMIT/ROLLBACK (the
+	// transaction hooks) and a transaction id.
+	return &vgi.AttachDecision{SupportsTransactions: &transactional}, nil
 }
 
 // callInfo is the attach options + transaction id of a process call.
@@ -104,7 +71,7 @@ type callInfo struct {
 }
 
 func callInfoOf(p *vgi.ProcessParams) callInfo {
-	return callInfo{Opts: decodeAttachOptions(p.AttachScope), Tx: p.TransactionOpaqueData}
+	return callInfo{Opts: optionsOf(p.AttachOptions()), Tx: p.TransactionOpaqueData}
 }
 
 func (c callInfo) connect() (BridgeConnection, error) { return resolveConnection(c.Opts) }

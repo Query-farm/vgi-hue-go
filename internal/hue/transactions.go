@@ -340,7 +340,7 @@ func transactionHooks() vgi.TransactionHooks {
 		},
 		Commit: func(_ context.Context, tx vgi.TransactionHookContext) error {
 			logDebug("commit tx=%x", tx.TransactionOpaqueData)
-			opts := decodeAttachOptions(tx.AttachOpaqueData)
+			opts := optionsOf(tx.AttachOptions())
 			if !opts.Transactional {
 				return nil
 			}
