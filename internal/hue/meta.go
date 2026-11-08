@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Query-farm/vgi-go/vgi"
 	"github.com/apache/arrow-go/v18/arrow"
 )
 
@@ -35,9 +34,9 @@ type category struct {
 // SchemaCategories group functions in docs and agent tools. Every function's
 // vgi.category must name one of these.
 var SchemaCategories = []category{
-	{Name: "text", Title: "Text", Description: "Functions that build or transform strings."},
-	{Name: "generators", Title: "Generators", Description: "Table functions that generate rows."},
-	{Name: "api", Title: "REST APIs", Description: "Table functions that read from HTTP APIs."},
+	{Name: "inventory", Title: "Inventory", Description: "Lights, rooms, zones and scenes on the bridge."},
+	{Name: "sensors", Title: "Sensors", Description: "Motion, temperature, light-level, contact and battery readings."},
+	{Name: "control", Title: "Control", Description: "Functions that change the state of real lights."},
 }
 
 // mustJSON marshals v, panicking on failure (only static data is passed).
@@ -104,24 +103,6 @@ func column(name string, typ arrow.DataType, comment string, nullable bool) arro
 type exampleQuery struct {
 	Description string `json:"description"`
 	SQL         string `json:"sql"`
-}
-
-// exampleQueries converts catalog examples to vgi.example_queries entries.
-func exampleQueries(lists ...[]vgi.CatalogExample) []exampleQuery {
-	out := []exampleQuery{}
-	for _, examples := range lists {
-		for _, ex := range examples {
-			out = append(out, exampleQuery{Description: ex.Description, SQL: ex.SQL})
-		}
-	}
-	return out
-}
-
-// withExamples publishes examples (with descriptions) as vgi.example_queries.
-// Overloads share one SQL name, so pass every overload's examples.
-func withExamples(tags map[string]string, lists ...[]vgi.CatalogExample) map[string]string {
-	tags["vgi.example_queries"] = mustJSON(exampleQueries(lists...))
-	return tags
 }
 
 const catalogDocLLM = "An example VGI worker generated from the Query.Farm starter template. It shows the three " +

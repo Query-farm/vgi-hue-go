@@ -1,148 +1,461 @@
 # name: test/sql/hue.test
-# description: SQL-level tests for the hue worker, run through DuckDB by ci/run-integration.sh
+# description: SQL-level tests for the hue worker against the mock bridge, run through DuckDB by ci/run-integration.sh
 # group: [hue]
-# managed-by: vgi-starters (edit upstream in shared/, then run tools/render.py)
 
 require vgi
 
 require-env HUE_WORKER
 
-require-env HUE_MOCK_API
+require-env HUE_MOCK_BRIDGE
 
-require-env HUE_MOCK_API_AUTH
-
+# The bridge address and app key are ATTACH options.
 statement ok
-ATTACH 'hue' (TYPE vgi, LOCATION '{HUE_WORKER}');
+ATTACH 'hue' (TYPE vgi, LOCATION '{HUE_WORKER}', bridge '{HUE_MOCK_BRIDGE}', app_key 'test-key');
 
-# ---------------------------------------------------------------- greet (scalar)
-
-query T
-SELECT hue.main.greet('Ada');
-----
-Hi, Ada!
-
-query T
-SELECT hue.main.greet('Ada', 'formal');
-----
-Good day, Ada.
-
-# NULL in, NULL out.
-query T
-SELECT hue.main.greet(NULL);
-----
-NULL
-
-# Works over a whole column, one result per row.
-query T
-SELECT hue.main.greet(name) FROM (VALUES ('Ada'), ('Grace'), (NULL)) AS t(name) ORDER BY ALL NULLS LAST;
-----
-Hi, Ada!
-Hi, Grace!
-NULL
-
-# `style` is constrained to 'casual' | 'formal' and checked when the query is bound.
-# (No expected message: each SDK words constraint errors its own way.)
-statement error
-SELECT hue.main.greet('Ada', 'loud');
-----
-<REGEX>:.*
-
-# ------------------------------------------------------ sequence_table (table fn)
-
-query II
-SELECT n, squared FROM hue.main.sequence_table(4) ORDER BY n;
-----
-0	0
-1	1
-2	4
-3	9
-
-# Named argument with a default.
+# app_key is declared secret, so DuckDB redacts it.
 query I
-SELECT n FROM hue.main.sequence_table(3, step := 5) ORDER BY n;
+SELECT options['app_key'] FROM duckdb_databases() WHERE database_name = 'hue';
 ----
-0
-5
-10
+<redacted>
 
-# Larger than one batch: the cursor must carry across process calls.
-query II
-SELECT count(*), max(n) FROM hue.main.sequence_table(25000);
+# ------------------------------------------------------------------ lights()
+
+query TTTTRTITT
+SELECT light_id, name, room, is_on, brightness, color_mode, color_temperature_kelvin, color_hex, reachable
+FROM hue.main.lights ORDER BY name;
 ----
-25000	24999
+l-desk	Desk lamp	Living room	true	100.0	color_temperature	4000	#ffcea6	false
+l-ceiling	Kitchen ceiling	Kitchen	true	80.0	color_temperature	2703	#ffa758	true
+l-pendant	Kitchen pendant	Kitchen	true	50.0	NULL	NULL	NULL	true
+l-sofa	Sofa lamp	Living room	false	30.0	xy	NULL	#ffb761	true
+
+query TII
+SELECT room, count(*), count(*) FILTER (WHERE is_on) FROM hue.main.lights GROUP BY room ORDER BY room;
+----
+Kitchen	2	2
+Living room	2	1
+
+query TTT
+SELECT name, product_name, model_id FROM hue.main.lights WHERE name = 'Sofa lamp';
+----
+Sofa lamp	Hue color lamp	LCA001
+
+# ------------------------------------------------------------------- rooms()
+
+query TTTRIT
+SELECT name, kind, any_on, brightness, light_count, light_names FROM hue.main.rooms ORDER BY kind, name;
+----
+Hallway	room	false	0.0	0	[]
+Kitchen	room	true	65.0	2	[Kitchen ceiling, Kitchen pendant]
+Living room	room	true	100.0	2	[Desk lamp, Sofa lamp]
+Downstairs	zone	true	80.0	2	[Kitchen ceiling, Sofa lamp]
+
+# ------------------------------------------------------------------ scenes()
+
+query TTTT
+SELECT scene_id, name, room, active FROM hue.main.scenes ORDER BY room, name;
+----
+s-bright-kitchen	Bright	Kitchen	true
+s-relax-kitchen	Relax	Kitchen	false
+s-relax-living	Relax	Living room	false
+
+# ----------------------------------------------------------------- sensors()
+
+query TTTTRRTIT
+SELECT kind, device_name, room, motion, temperature_c, light_level_lux, contact, battery_percent, battery_state
+FROM hue.main.sensors ORDER BY device_name, kind;
+----
+contact	Front door	Hallway	NULL	NULL	NULL	false	NULL	NULL
+device_power	Front door	Hallway	NULL	NULL	NULL	NULL	90	normal
+device_power	Hallway sensor	Hallway	NULL	NULL	NULL	NULL	15	low
+light_level	Hallway sensor	Hallway	NULL	NULL	100.0	NULL	NULL	NULL
+motion	Hallway sensor	Hallway	true	NULL	NULL	NULL	NULL	NULL
+temperature	Hallway sensor	Hallway	NULL	19.5	NULL	NULL	NULL	NULL
+device_power	Hue tap dial switch	Living room	NULL	NULL	NULL	NULL	74	normal
+device_power	Kitchen sensor	Kitchen	NULL	NULL	NULL	NULL	80	normal
+light_level	Kitchen sensor	Kitchen	NULL	NULL	1.0	NULL	NULL	NULL
+motion	Kitchen sensor	Kitchen	false	NULL	NULL	NULL	NULL	NULL
+temperature	Kitchen sensor	Kitchen	NULL	23.25	NULL	NULL	NULL	NULL
+device_power	Living room sensor	Living room	NULL	NULL	NULL	NULL	100	normal
+light_level	Living room sensor	Living room	NULL	NULL	NULL	NULL	NULL	NULL
+motion	Living room sensor	Living room	NULL	NULL	NULL	NULL	NULL	NULL
+temperature	Living room sensor	Living room	NULL	NULL	NULL	NULL	NULL	NULL
+
+# A disabled sensor: enabled is false and its stale readings (30 °C, 1000 lux,
+# motion) are not shown, nor when they last changed.
+query TTT
+SELECT kind, enabled, last_changed IS NULL FROM hue.main.sensors WHERE device_name = 'Living room sensor' AND kind <> 'device_power' ORDER BY kind;
+----
+light_level	false	true
+motion	false	true
+temperature	false	true
+
+query T
+SELECT epoch(last_changed)::BIGINT FROM hue.main.sensors WHERE kind = 'motion' AND device_name = 'Hallway sensor';
+----
+1793527200
+
+# Kitchen, not the disabled Living room sensor's stale 30 °C.
+query T
+SELECT room FROM hue.main.sensors WHERE kind = 'temperature' ORDER BY temperature_c DESC NULLS LAST LIMIT 1;
+----
+Kitchen
+
+# --------------------------------------------------------------- set_light()
+
+# Names match case-insensitively; brightness above 0 implies on.
+query TTTTTTT
+SELECT * FROM hue.main.set_light('sofa lamp', brightness := 60, color := 'red');
+----
+light	l-sofa	Sofa lamp	true	NULL	{"dimming":{"brightness":60},"on":{"on":true},"color":{"xy":{"x":0.7006,"y":0.2993}}}	NULL
+
+query TRTRR
+SELECT is_on, brightness, color_mode, color_x, color_y FROM hue.main.lights WHERE light_id = 'l-sofa';
+----
+true	60.0	xy	0.7006	0.2993
+
+# By id, with a fade.
+query T
+SELECT request FROM hue.main.set_light('l-desk', kelvin := 2700, transition_ms := 500);
+----
+{"color_temperature":{"mirek":370},"dynamics":{"duration":500}}
 
 query I
-SELECT count(*) FROM hue.main.sequence_table(0);
+SELECT color_temperature_kelvin FROM hue.main.lights WHERE light_id = 'l-desk';
 ----
-0
+2703
 
-# count is constrained to [0, 1000000].
+# brightness 0 turns the light off.
+query T
+SELECT request FROM hue.main.set_light('Desk lamp', brightness := 0);
+----
+{"on":{"on":false}}
+
+query T
+SELECT is_on FROM hue.main.lights WHERE light_id = 'l-desk';
+----
+false
+
+# No state argument at all.
 statement error
-SELECT * FROM hue.main.sequence_table(-1);
+SELECT * FROM hue.main.set_light('Sofa lamp');
+----
+nothing to change
+
+statement error
+SELECT * FROM hue.main.set_light('No such lamp', power := true);
+----
+no light with id or name 'No such lamp'
+
+statement error
+SELECT * FROM hue.main.set_light('Sofa lamp', brightness := 150);
 ----
 <REGEX>:.*
 
-# Named arguments are constrained too: step >= 1.
 statement error
-SELECT * FROM hue.main.sequence_table(3, step := 0);
+SELECT * FROM hue.main.set_light('Sofa lamp', kelvin := 1000);
 ----
 <REGEX>:.*
 
-# ------------------------------------------------- fetch_items (REST table fn)
-
-query IIT
-SELECT count(*), sum(id), min(name) FROM hue.main.fetch_items('{HUE_MOCK_API}', page_size := 4);
+statement error
+SELECT * FROM hue.main.set_light('Sofa lamp', kelvin := 3000, color := 'blue');
 ----
-25	325	item-01
+either kelvin or color
+
+statement error
+SELECT * FROM hue.main.set_light('Sofa lamp', color := 'chartreuse-ish');
+----
+invalid color
+
+# The bridge's own refusal (a white-only lamp cannot take a colour) carries the HTTP status.
+statement error
+SELECT * FROM hue.main.set_light('Kitchen pendant', color := 'blue');
+----
+HTTP 400
+
+# ---------------------------------------------------------------- set_room()
+
+query TTTT
+SELECT target_type, target_id, name, ok FROM hue.main.set_room('Kitchen', power := false);
+----
+room	r-kitchen	Kitchen	true
+
+query TT
+SELECT name, is_on FROM hue.main.lights WHERE room = 'Kitchen' ORDER BY name;
+----
+Kitchen ceiling	false
+Kitchen pendant	false
+
+query TT
+SELECT target_type, name FROM hue.main.set_room('downstairs', brightness := 25);
+----
+zone	Downstairs
+
+query TTR
+SELECT name, is_on, brightness FROM hue.main.lights WHERE name IN ('Kitchen ceiling', 'Sofa lamp') ORDER BY name;
+----
+Kitchen ceiling	true	25.0
+Sofa lamp	true	25.0
+
+# wait_ms re-reads the lights until they all report the change; `settled`
+# says whether they did (the mock applies room commands at once). The
+# unreachable Desk lamp is not waited for.
+query TTT
+SELECT name, settled, request FROM hue.main.set_room('Living room', brightness := 70, wait_ms := 2000);
+----
+Living room	true	{"dimming":{"brightness":70},"on":{"on":true}}
+
+query I
+SELECT settled IS NULL FROM hue.main.set_room('Living room', brightness := 25);
+----
+true
+
+statement error
+SELECT * FROM hue.main.set_room('Living room', power := true, wait_ms := 60000);
+----
+<REGEX>:.*
+
+statement error
+SELECT * FROM hue.main.set_room('Attic', power := true);
+----
+no room or zone
+
+# ------------------------------------------------------------ recall_scene()
+
+# 'Relax' exists in two rooms.
+statement error
+SELECT * FROM hue.main.recall_scene('Relax');
+----
+several rooms
+
+query TTT
+SELECT target_type, target_id, ok FROM hue.main.recall_scene('Relax', room := 'Kitchen');
+----
+scene	s-relax-kitchen	true
+
+query TT
+SELECT name, active FROM hue.main.scenes WHERE room = 'Kitchen' ORDER BY name;
+----
+Bright	false
+Relax	true
+
+query TTRI
+SELECT name, is_on, brightness, color_temperature_kelvin FROM hue.main.lights WHERE room = 'Kitchen' ORDER BY name;
+----
+Kitchen ceiling	true	40.0	2237
+Kitchen pendant	false	50.0	NULL
+
+query T
+SELECT target_id FROM hue.main.recall_scene('s-relax-living');
+----
+s-relax-living
+
+# -------------------------------------------------------------- set_lights()
+
+# Bulk change from a query; a per-light failure (the white-only pendant cannot
+# take a colour temperature) is reported in its row, not raised.
+query TTTT
+SELECT target_id, name, ok, error IS NOT NULL
+FROM hue.main.set_lights((SELECT light_id, name FROM hue.main.lights), kelvin := 3000)
+ORDER BY target_id;
+----
+l-ceiling	Kitchen ceiling	true	false
+l-desk	Desk lamp	true	false
+l-pendant	Kitchen pendant	false	true
+l-sofa	Sofa lamp	true	false
 
 query TI
-SELECT category, count(*) FROM hue.main.fetch_items('{HUE_MOCK_API}') GROUP BY category ORDER BY category;
+SELECT name, color_temperature_kelvin FROM hue.main.lights WHERE color_mode IS NOT NULL ORDER BY name;
 ----
-hardware	8
-service	8
-software	9
-
-# The harness runs HUE_MOCK_API with MOCK_API_FLAKY=1: every page answers
-# 429 + Retry-After once, so every query above also exercised the retry path.
-
-# HUE_MOCK_API_AUTH requires a bearer token ('test-token'). Every language's
-# fetch_items must put the HTTP status code in its error message.
-statement error
-SELECT count(*) FROM hue.main.fetch_items('{HUE_MOCK_API_AUTH}');
-----
-401
-
-statement ok
-CREATE SECRET hue_api_test (TYPE hue_api, TOKEN 'test-token');
+Desk lamp	3003
+Kitchen ceiling	3003
+Sofa lamp	3003
 
 query I
-SELECT count(*) FROM hue.main.fetch_items('{HUE_MOCK_API_AUTH}', page_size := 25);
+SELECT count(*) FILTER (WHERE ok) FROM hue.main.set_lights((SELECT light_id FROM hue.main.lights WHERE is_on), power := false);
 ----
-25
+3
 
-# Several pages: the token must survive between batches (over HTTP each batch is a
-# separate request, so a token kept only in memory is lost after page 1).
 query I
-SELECT count(*) FROM hue.main.fetch_items('{HUE_MOCK_API_AUTH}', page_size := 7);
+SELECT count(*) FROM hue.main.lights WHERE is_on;
 ----
-25
+0
+
+# Empty input: nothing to change, no rows.
+query I
+SELECT count(*) FROM hue.main.set_lights((SELECT light_id FROM hue.main.lights WHERE false), power := true);
+----
+0
+
+statement error
+SELECT * FROM hue.main.set_lights((SELECT name FROM hue.main.lights), power := true);
+----
+light_id column
+
+# ------------------------------------------------------------- configuration
+
+# A wrong app key: the bridge's 403 comes back with a hint.
+statement ok
+ATTACH 'hue' AS hue_badkey (TYPE vgi, LOCATION '{HUE_WORKER}', bridge '{HUE_MOCK_BRIDGE}', app_key 'wrong-key');
+
+statement error
+SELECT count(*) FROM hue_badkey.main.lights;
+----
+HTTP 403
+
+# No options and no HUE_BRIDGE / HUE_APP_KEY in the worker's environment.
+statement ok
+ATTACH 'hue' AS hue_noopts (TYPE vgi, LOCATION '{HUE_WORKER}');
+
+statement error
+SELECT count(*) FROM hue_noopts.main.lights;
+----
+No Hue app key configured
+
+# --------------------------------------------------------------- discovery
+
+# No bridge option: the worker discovers it (the harness points discovery at
+# the mock's stand-in for discovery.meethue.com and turns mDNS off).
+statement ok
+ATTACH 'hue' AS hue_found (TYPE vgi, LOCATION '{HUE_WORKER}', app_key 'test-key');
+
+query I
+SELECT count(*) FROM hue_found.main.lights;
+----
+4
+
+query T
+SELECT name FROM hue_found.main.rooms WHERE kind = 'zone';
+----
+Downstairs
+
+# A bridge id instead of an address picks that bridge (case-insensitive).
+statement ok
+ATTACH 'hue' AS hue_byid (TYPE vgi, LOCATION '{HUE_WORKER}', bridge '001788FFFE00BEEF', app_key 'test-key');
+
+query I
+SELECT count(*) FROM hue_byid.main.scenes;
+----
+3
 
 statement ok
-DROP SECRET hue_api_test;
+ATTACH 'hue' AS hue_wrongid (TYPE vgi, LOCATION '{HUE_WORKER}', bridge 'ffffffffffffffff', app_key 'test-key');
 
-# base_url must be http(s).
 statement error
-SELECT * FROM hue.main.fetch_items('ftp://example.com');
+SELECT count(*) FROM hue_wrongid.main.lights;
 ----
-<REGEX>:.*
+no Hue bridge with id ffffffffffffffff
 
-# page_size is a named argument constrained to [1, 1000].
-statement error
-SELECT * FROM hue.main.fetch_items('{HUE_MOCK_API}', page_size := 0);
+# Binding never contacts the bridge, so DESCRIBE works without one.
+query I
+SELECT count(*) FROM (DESCRIBE SELECT * FROM hue_noopts.main.sensors);
 ----
-<REGEX>:.*
+14
+
+# ------------------------------------------------------------------ UPDATE
+
+# Every light has a stable rowid (a hash of its id): same value on every scan.
+query I
+SELECT count(DISTINCT rowid) = count(*) AND min(rowid) > 0 FROM hue.main.lights;
+----
+true
+
+query I
+SELECT (SELECT rowid FROM hue.main.lights WHERE light_id = 'l-sofa') = (SELECT rowid FROM hue.main.lights WHERE light_id = 'l-sofa');
+----
+true
+
+statement ok
+UPDATE hue.main.lights SET is_on = true, brightness = 45 WHERE room = 'Kitchen';
+
+query TTR
+SELECT name, is_on, brightness FROM hue.main.lights WHERE room = 'Kitchen' ORDER BY name;
+----
+Kitchen ceiling	true	45.0
+Kitchen pendant	true	45.0
+
+# White temperature on the ambiance bulb; RETURNING shows the row as written.
+query TTI
+UPDATE hue.main.lights SET color_temperature_kelvin = 2700 WHERE light_id = 'l-ceiling' RETURNING name, color_mode, color_temperature_kelvin;
+----
+Kitchen ceiling	color_temperature	2703
+
+query TTT
+UPDATE hue.main.lights SET color_hex = '#ff0000', is_on = true WHERE light_id = 'l-sofa' RETURNING name, color_mode, color_hex;
+----
+Sofa lamp	xy	#ff0000
+
+query RR
+SELECT color_x, color_y FROM hue.main.lights WHERE light_id = 'l-sofa';
+----
+0.7006	0.2993
+
+# Rename on the bridge, and read it back.
+statement ok
+UPDATE hue.main.lights SET name = 'Reading lamp' WHERE light_id = 'l-desk';
+
+query T
+SELECT name FROM hue.main.lights WHERE light_id = 'l-desk';
+----
+Reading lamp
+
+# Rename and change state in one statement: a bridge ignores state sent with a
+# rename, so both must arrive (as separate requests).
+statement ok
+UPDATE hue.main.lights SET name = 'Desk lamp', is_on = true, brightness = 55 WHERE light_id = 'l-desk';
+
+query TTR
+SELECT name, is_on, brightness FROM hue.main.lights WHERE light_id = 'l-desk';
+----
+Desk lamp	true	55.0
+
+# SET can compute from the current value.
+statement ok
+UPDATE hue.main.lights SET brightness = 30 WHERE light_id = 'l-sofa';
+
+query I
+UPDATE hue.main.lights SET brightness = brightness + 10 WHERE light_id = 'l-sofa' RETURNING brightness;
+----
+40.0
+
+# A statement matching no light changes nothing.
+statement ok
+UPDATE hue.main.lights SET is_on = false WHERE room = 'Attic';
+
+# Read-only columns are refused, before any light changes.
+statement error
+UPDATE hue.main.lights SET room = 'Attic';
+----
+cannot UPDATE 'room' of hue.main.lights
 
 statement error
-SELECT * FROM hue.main.fetch_items('{HUE_MOCK_API}', page_size := 5000);
+UPDATE hue.main.lights SET reachable = true WHERE light_id = 'l-desk';
+----
+cannot UPDATE 'reachable'
+
+statement error
+UPDATE hue.main.lights SET brightness = 150 WHERE light_id = 'l-sofa';
+----
+brightness must be 0–100
+
+statement error
+UPDATE hue.main.lights SET brightness = NULL WHERE light_id = 'l-sofa';
+----
+cannot SET brightness = NULL
+
+statement error
+UPDATE hue.main.lights SET name = '' WHERE light_id = 'l-sofa';
+----
+1-32 characters
+
+# The bridge's own refusal (a white-only bulb has no colour) carries the status.
+statement error
+UPDATE hue.main.lights SET color_hex = '#0000ff' WHERE light_id = 'l-pendant';
+----
+HTTP 400
+
+# The other tables are read-only.
+statement error
+UPDATE hue.main.rooms SET name = 'Den';
 ----
 <REGEX>:.*

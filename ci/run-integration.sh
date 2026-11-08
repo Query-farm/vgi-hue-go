@@ -67,13 +67,29 @@ start_server() {
   echo "::error::'$*' never printed PORT:<n>"; cat "$log"; return 1
 }
 
-# The mock APIs fetch_items is tested against. The plain one rate-limits every
-# page once (429 + Retry-After) so the retry path is always exercised.
-unset HUE_API_TOKEN
-MOCK_API_FLAKY=1 start_server "$STAGE/mock.log" $PYTHON "$REPO/test/mock_api/server.py"
-export HUE_MOCK_API="http://127.0.0.1:$PORT"
-MOCK_API_TOKEN=test-token start_server "$STAGE/mock-auth.log" $PYTHON "$REPO/test/mock_api/server.py"
-export HUE_MOCK_API_AUTH="http://127.0.0.1:$PORT"
+# The mock Hue bridge the SQL tests attach to. It answers the first GET of
+# every path with 429 + Retry-After so the retry path is always exercised.
+# Clear any real bridge settings so a developer's environment cannot leak in.
+# Each test file gets a fresh mock (start_mock, below): the files assume the
+# mock's initial light state, and the runner's file order follows the
+# directory listing, so a shared mock made them order-dependent.
+unset HUE_BRIDGE HUE_APP_KEY
+MOCK_PID=""
+start_mock() {
+  [ -n "$MOCK_PID" ] && { kill "$MOCK_PID" 2>/dev/null || true; wait "$MOCK_PID" 2>/dev/null || true; }
+  MOCK_FLAKY=1 start_server "$STAGE/mock.log" $PYTHON "$REPO/test/mock_bridge/server.py"
+  MOCK_PID="${PIDS[${#PIDS[@]}-1]}"
+  export HUE_MOCK_BRIDGE="http://127.0.0.1:$PORT"
+  export HUE_DISCOVERY_URL="$HUE_MOCK_BRIDGE/discovery"
+}
+start_mock
+# Bridge discovery (ATTACH without `bridge`) goes to the mock's stand-in for
+# discovery.meethue.com only: no mDNS on the real LAN, and a throwaway cache.
+export HUE_DISCOVERY_SCHEME=http
+export HUE_DISCOVERY_MDNS=off
+export XDG_CACHE_HOME="$STAGE/cache"
+# Staged transaction requests go to a throwaway directory too.
+export HUE_TX_DIR="$STAGE/tx"
 
 HTTP=0
 case "$TRANSPORT" in
@@ -81,8 +97,8 @@ case "$TRANSPORT" in
   launch) export HUE_WORKER="launch:$WORKER" ;;
   http)
     HTTP=1
-    start_server "$STAGE/worker.log" "$WORKER" --http --port 0
-    export HUE_WORKER="http://127.0.0.1:$PORT"
+    # Started per test file, after its mock (start_http_worker, below):
+    # the worker reads the mock's discovery URL from its environment.
     ;;
   *) echo "::error::unknown TRANSPORT=$TRANSPORT (expected stdio|launch|http)"; exit 1 ;;
 esac
@@ -123,17 +139,38 @@ cat > "$STAGE/no_error_skip.json" <<'EOF'
 {"skip_error_messages": ["__vgi_hue_never_matches__"]}
 EOF
 
-echo "Running test/sql over $TRANSPORT (worker: $HUE_WORKER)"
+echo "Running test/sql over $TRANSPORT (worker: ${HUE_WORKER:-http, one per file})"
 LOG="$STAGE/unittest.log"
 rc=0
-( cd "$STAGE" && "$HAYBARN_UNITTEST" --keep-home --test-dir "$STAGE" \
-    --test-config "$STAGE/no_error_skip.json" "test/sql/*" ) 2>&1 | tee "$LOG" && rc=0 || rc="${PIPESTATUS[0]}"
+# start_http_worker restarts the HTTP worker so it sees the current mock;
+# a worker that died during the previous file fails the run.
+WORKER_PID=""
+start_http_worker() {
+  if [ -n "$WORKER_PID" ]; then
+    if ! kill -0 "$WORKER_PID" 2>/dev/null; then
+      echo "::error::the HTTP worker died during the run:"; cat "$STAGE/worker.log"; rc=1
+    fi
+    kill "$WORKER_PID" 2>/dev/null || true; wait "$WORKER_PID" 2>/dev/null || true
+  fi
+  start_server "$STAGE/worker.log" "$WORKER" --http --port 0
+  WORKER_PID="${PIDS[${#PIDS[@]}-1]}"
+  export HUE_WORKER="http://127.0.0.1:$PORT"
+}
+
+: > "$LOG"
+total=0
+for f in "$STAGE"/test/sql/*.test; do
+  start_mock
+  [ "$HTTP" = "1" ] && start_http_worker
+  name="test/sql/$(basename "$f")"
+  ( cd "$STAGE" && "$HAYBARN_UNITTEST" --keep-home --test-dir "$STAGE" \
+      --test-config "$STAGE/no_error_skip.json" "$name" ) 2>&1 | tee -a "$LOG" || rc="${PIPESTATUS[0]}"
+  total=$((total + 1))
+done
 
 if grep -q 'No test cases matched\|No tests ran' "$LOG"; then
   echo "::error::no test cases matched; the staging is wrong"; exit 1
 fi
-total="$(sed -n 's/^\[[0-9]*\/\([0-9]*\)\].*/\1/p' "$LOG" | tail -1)"
-total="${total:-0}"
 skips="$(awk '/^Skipped tests for the following reasons:/{b=1;next} b&&/^[[:space:]]*$/{b=0} b&&match($0,/: [0-9]+[[:space:]]*$/){print substr($0,1,RSTART-1) "\t" substr($0,RSTART+2)+0}' "$LOG")"
 skipped=0
 while IFS=$'\t' read -r reason n; do
@@ -150,7 +187,7 @@ echo "executed $executed of $total test files over $TRANSPORT ($skipped skipped)
 if [ "$executed" -lt "$MIN_EXECUTED" ]; then
   echo "::error::only $executed test files ran (MIN_EXECUTED=$MIN_EXECUTED)"; rc=1
 fi
-if [ "$HTTP" = "1" ] && ! kill -0 "${PIDS[2]}" 2>/dev/null; then
+if [ "$HTTP" = "1" ] && ! kill -0 "$WORKER_PID" 2>/dev/null; then
   echo "::error::the HTTP worker died during the run:"; cat "$STAGE/worker.log"; rc=1
 fi
 exit "$rc"
