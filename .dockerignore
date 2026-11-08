@@ -1,0 +1,5 @@
+bin/
+dist/
+.tools/
+.git/
+duckdb_unittest_tempdir/

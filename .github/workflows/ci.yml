@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned together: the SQL test runner and the metadata checker must speak the
+  # same VGI protocol as the SDK. Template updates bump these (make template-diff).
+  HAYBARN_VERSION: "2.0.0rc11"
+  # Pure Go. Importing vgi-go/vgi/exprduckdb (for Evaluate/AutoApplyFilters) needs cgo.
+  CGO_ENABLED: "0"
+
+jobs:
+  quality:
+    name: Lint + unit tests (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.26", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - run: make lint
+      - run: make test-unit
+
+  integration:
+    name: SQL tests (${{ matrix.os }}, ${{ matrix.transport }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # template-only:start
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # template-only:end
+        # macOS minutes cost 10x on private repos; add macos-latest here when you need it.
+        # fork-only: os: [ubuntu-latest, windows-latest]
+        transport: [stdio, launch, http]
+        exclude:
+          - os: windows-latest
+            transport: launch   # the launcher uses AF_UNIX sockets
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Build the worker and the recipes
+        run: |
+          exe=""; [ "$RUNNER_OS" = "Windows" ] && exe=.exe
+          go build -o "bin/vgi-starter-worker$exe" ./cmd/vgi-starter-worker
+          go build -o "bin/recipes$exe" ./examples
+      - name: Install the SQL test runner
+        run: |
+          uv venv .tools
+          uv pip install -p .tools "haybarn-unittest==${HAYBARN_VERSION}"
+      - name: Run test/sql over ${{ matrix.transport }}
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then tools="$PWD/.tools/Scripts"; exe=.exe
+          else tools="$PWD/.tools/bin"; exe=""; fi
+          export WORKER="$PWD/bin/vgi-starter-worker$exe"
+          export HAYBARN_UNITTEST="$tools/haybarn-unittest$exe"
+          export RECIPES_WORKER="$PWD/bin/recipes$exe"
+          TRANSPORT=${{ matrix.transport }} PYTHON="uv run --no-project python" ci/run-integration.sh
+
+  metadata:
+    name: Metadata quality (vgi-lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -o bin/vgi-starter-worker ./cmd/vgi-starter-worker
+      - name: Read fail_on from vgi-lint.toml
+        id: lintcfg
+        run: python3 -c 'import tomllib; print("fail_on=" + tomllib.load(open("vgi-lint.toml", "rb")).get("fail_on", "error"))' >> "$GITHUB_OUTPUT"
+      - uses: Query-farm/vgi-lint-check@v2
+        with:
+          location: ${{ github.workspace }}/bin/vgi-starter-worker
+          # Set in vgi-lint.toml, so local runs and CI agree.
+          fail-on: ${{ steps.lintcfg.outputs.fail_on }}
+          # Set to false if your examples need real credentials or network access.
+          execute: true
+
+  docker:
+    name: Docker image smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t worker:ci .
+      - name: HTTP /health
+        run: |
+          docker run -d --name smoke -p 8000:8000 worker:ci
+          for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && exit 0; sleep 1; done
+          docker logs smoke; exit 1

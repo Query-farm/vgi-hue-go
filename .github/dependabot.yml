@@ -1,0 +1,16 @@
+# Keeps GitHub Actions and Go dependencies current. vgi-go minor/major bumps are
+# ignored: they can change the wire protocol, which must match the DuckDB
+# extension exactly. Take those through template updates (make template-diff).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    groups: { actions: { patterns: ["*"] } }
+  - package-ecosystem: gomod
+    directory: /
+    schedule: { interval: weekly }
+    groups: { go: { patterns: ["*"] } }
+    ignore:
+      - dependency-name: github.com/Query-farm/vgi-go
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]

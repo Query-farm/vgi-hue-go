@@ -1,0 +1,8 @@
+{
+  "template": "vgi-starter-go",
+  "lang": "go",
+  "template_version": "0.1.0",
+  "post_init": ["go mod tidy", "gofmt -w ."],
+  "template_only_files": [".github/workflows/template-init.yml"],
+  "optional_files": [".github/workflows/nightly.yml", ".github/dependabot.yml"]
+}

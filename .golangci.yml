@@ -1,0 +1,39 @@
+# golangci-lint v2 configuration. Run: make lint
+# Conservative: rules that catch real bugs, dead code and missing docs.
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - revive
+    - godot
+  settings:
+    staticcheck:
+      checks:
+        - "all"
+        # ST1000: package comments are required only where they help (revive checks them).
+        - "-ST1000"
+        # ST1003: `make init NAME=foo_bar` renames the package to foo_bar; underscores are intended.
+        - "-ST1003"
+    revive:
+      enable-all-rules: false
+      rules:
+        # Exported symbols carry a doc comment that starts with their name.
+        - name: exported
+        - name: comment-spacings
+    godot:
+      scope: declarations
+  exclusions:
+    rules:
+      # Tests often ignore Close errors.
+      - path: _test\.go
+        linters: [errcheck]
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
