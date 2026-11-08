@@ -1,4 +1,4 @@
-module github.com/Query-farm/vgi-starter-go
+module github.com/your-org/vgi-hue
 
 go 1.26.0
 

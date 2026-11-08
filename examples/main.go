@@ -15,7 +15,7 @@ import (
 
 	"github.com/Query-farm/vgi-go/vgi"
 
-	"github.com/Query-farm/vgi-starter-go/internal/serve"
+	"github.com/your-org/vgi-hue/internal/serve"
 )
 
 // recipes maps a recipe name to the function that builds its worker.

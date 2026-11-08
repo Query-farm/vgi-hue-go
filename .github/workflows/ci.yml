@@ -44,11 +44,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # template-only:start
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        # template-only:end
         # macOS minutes cost 10x on private repos; add macos-latest here when you need it.
-        # fork-only: os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
         transport: [stdio, launch, http]
         exclude:
           - os: windows-latest
@@ -67,7 +64,7 @@ jobs:
       - name: Build the worker and the recipes
         run: |
           exe=""; [ "$RUNNER_OS" = "Windows" ] && exe=.exe
-          go build -o "bin/vgi-starter-worker$exe" ./cmd/vgi-starter-worker
+          go build -o "bin/vgi-hue-worker$exe" ./cmd/vgi-hue-worker
           go build -o "bin/recipes$exe" ./examples
       - name: Install the SQL test runner
         run: |
@@ -77,7 +74,7 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then tools="$PWD/.tools/Scripts"; exe=.exe
           else tools="$PWD/.tools/bin"; exe=""; fi
-          export WORKER="$PWD/bin/vgi-starter-worker$exe"
+          export WORKER="$PWD/bin/vgi-hue-worker$exe"
           export HAYBARN_UNITTEST="$tools/haybarn-unittest$exe"
           export RECIPES_WORKER="$PWD/bin/recipes$exe"
           TRANSPORT=${{ matrix.transport }} PYTHON="uv run --no-project python" ci/run-integration.sh
@@ -90,13 +87,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go build -o bin/vgi-starter-worker ./cmd/vgi-starter-worker
+      - run: go build -o bin/vgi-hue-worker ./cmd/vgi-hue-worker
       - name: Read fail_on from vgi-lint.toml
         id: lintcfg
         run: python3 -c 'import tomllib; print("fail_on=" + tomllib.load(open("vgi-lint.toml", "rb")).get("fail_on", "error"))' >> "$GITHUB_OUTPUT"
       - uses: Query-farm/vgi-lint-check@v2
         with:
-          location: ${{ github.workspace }}/bin/vgi-starter-worker
+          location: ${{ github.workspace }}/bin/vgi-hue-worker
           # Set in vgi-lint.toml, so local runs and CI agree.
           fail-on: ${{ steps.lintcfg.outputs.fail_on }}
           # Set to false if your examples need real credentials or network access.

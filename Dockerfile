@@ -13,15 +13,15 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-    go build -trimpath -ldflags="-s -w" -o /out/vgi-starter-worker ./cmd/vgi-starter-worker
+    go build -trimpath -ldflags="-s -w" -o /out/vgi-hue-worker ./cmd/vgi-hue-worker
 
 FROM debian:bookworm-slim
 
 ARG VERSION=0.0.0
 ARG GIT_COMMIT=unknown
-LABEL org.opencontainers.image.title="vgi-starter-worker" \
+LABEL org.opencontainers.image.title="vgi-hue-worker" \
       org.opencontainers.image.description="A VGI worker for DuckDB" \
-      org.opencontainers.image.source="https://github.com/Query-farm/vgi-starter-go" \
+      org.opencontainers.image.source="https://github.com/your-org/vgi-hue" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${GIT_COMMIT}" \
       org.opencontainers.image.licenses="0BSD"
@@ -32,7 +32,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PORT=8000
-COPY --from=build --chmod=0755 /out/vgi-starter-worker /usr/local/bin/vgi-starter-worker
+COPY --from=build --chmod=0755 /out/vgi-hue-worker /usr/local/bin/vgi-hue-worker
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 # Run as an unprivileged user.

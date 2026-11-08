@@ -1,4 +1,4 @@
-package starter
+package hue
 
 // Version is the worker version. ci/check-version.sh checks release tags
 // (vX.Y.Z) against it, and the catalog advertises it to DuckDB.

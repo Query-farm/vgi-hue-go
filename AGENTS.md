@@ -21,8 +21,8 @@ Faster loops while iterating: `make test-unit`, `make test-sql`, `make lint-expl
 ## Layout
 
 ```
-cmd/vgi-starter-worker/  # main.go: the worker binary (flags -> serve.Main)
-internal/starter/
+cmd/vgi-hue-worker/  # main.go: the worker binary (flags -> serve.Main)
+internal/hue/
   worker.go        # assembles the catalog; register new functions in NewWorker
   meta.go          # catalog/schema metadata + helpers (objectTags, column)
   greet.go         # scalar example (overloads, constant arg with choices)
@@ -41,7 +41,7 @@ vgi-agent-tests.yaml  # private graders for the agent test tasks
 
 ## Recipe: add a function
 
-1. Create `internal/starter/<name>.go`. Copy the closest example: `greet.go` for a
+1. Create `internal/hue/<name>.go`. Copy the closest example: `greet.go` for a
    scalar, `sequence.go` for a generator, `fetch_items.go` for an API.
 2. Declare arguments as a struct with `vgi:"..."` tags. Use `pos=N` for positional
    arguments and `default=V` (no `pos`) for named ones; add `ge=`, `le=`, `pattern=` or
@@ -51,20 +51,20 @@ vgi-agent-tests.yaml  # private graders for the agent test tasks
    and `Examples`), then `OnBindTyped`/`ProcessTyped` (scalar, wrap with
    `vgi.AsScalarFunction[Args]`) or `ArgumentSpecs`/`OnBind`/`NewState`/`Process` (table,
    wrap with `vgi.AsTableFunction[State]`).
-4. Register it in `NewWorker` in `internal/starter/worker.go`, and add its examples to
+4. Register it in `NewWorker` in `internal/hue/worker.go`, and add its examples to
    `allExamples`.
 
 Then, for every new function:
 
-1. **Metadata** (`internal/starter/meta.go` and each function's `Metadata()`): title, category from the schema's category list,
+1. **Metadata** (`internal/hue/meta.go` and each function's `Metadata()`): title, category from the schema's category list,
    keywords, `doc_llm` (for agents: what it does, arguments, when to use it) and `doc_md`
    (for humans). Describe each argument, and for table functions describe the result
    columns. Add 1–2 `examples` with fully qualified, analytical SQL
-   (`starter.main.fn(...)`): project, filter or aggregate rather than `SELECT *`.
+   (`hue.main.fn(...)`): project, filter or aggregate rather than `SELECT *`.
 2. **Executable examples:** if the function is deterministic and needs no network,
    add an `executable_examples` entry with `ORDER BY` and an `expected_result`.
-3. **SQL test:** add cases to `test/sql/starter.test`, or a new `test/sql/<name>.test`
-   with the same header (`require vgi`, `require-env STARTER_WORKER`, then `ATTACH`).
+3. **SQL test:** add cases to `test/sql/hue.test`, or a new `test/sql/<name>.test`
+   with the same header (`require vgi`, `require-env HUE_WORKER`, then `ATTACH`).
    Avoid expected-error text that depends on SDK wording; use `<REGEX>:.*` for errors you
    don't control.
 4. **Unit test** for any non-trivial logic.
@@ -117,14 +117,14 @@ Recipes for most kinds are in `examples/`.
   published so DuckDB and agents can discover them, but SDKs differ in which ones they
   enforce: some skip named table arguments, C# enforces none, and `pattern` matching
   differs (Java requires a full match). Where its SDK doesn't enforce a constraint, the
-  starter re-checks it in bind code. Do the same, and on a columnar scalar argument validate
+  hue re-checks it in bind code. Do the same, and on a columnar scalar argument validate
   values in the compute body.
 - **Reserved argument names.** DuckDB keywords such as `interval`, `end`, `from`, `order`
   and `table` break `name := value` syntax. Pick another name (`start_date`, `end_date`).
 - **State must be serializable.** Table-function state (the `S` in `TypedTableFunc[S]`) is gob-encoded into the HTTP continuation token between batches, because each batch can be served by a different request or process. Keep the cursor in *exported* fields (gob silently drops unexported ones, so the scan would restart from row 0), keep it small, and never put secrets in it.
 - **Examples must be deterministic.** Add `ORDER BY`, and no `now()`, random values or
   network. Examples that hit a live API go in `examples`, not `executable_examples`.
-- **Credentials.** Read them from a DuckDB secret first (`CREATE SECRET (TYPE starter_api, …)`),
+- **Credentials.** Read them from a DuckDB secret first (`CREATE SECRET (TYPE hue_api, …)`),
   then from an environment variable. Never put them in logs, examples or the repo, and
   keep them out of table-function state unless the state rule above says
   the SDK encrypts it. Workers that need real credentials set `execute: false` on the metadata check.
@@ -173,6 +173,6 @@ Recipes for most kinds are in `examples/`.
 
 - "Add a scalar `slugify(text VARCHAR) -> VARCHAR` with full metadata and tests."
 - "Replace `fetch_items` with a table function for <API>. Map its JSON to typed columns,
-  read the token from a `starter_api` secret, and add mock-server tests."
+  read the token from a `hue_api` secret, and add mock-server tests."
 - "Add a catalog table `countries` (code, name) with a primary key, following
   `examples/catalog_tables`."

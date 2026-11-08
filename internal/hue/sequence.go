@@ -14,7 +14,7 @@
 //     continuation token: keep the cursor in *exported* fields, because gob
 //     silently drops unexported ones and the scan would restart from row 0.
 
-package starter
+package hue
 
 import (
 	"context"
@@ -46,9 +46,9 @@ var sequenceSchema = arrow.NewSchema([]arrow.Field{
 }, nil)
 
 var sequenceExamples = []vgi.CatalogExample{
-	{SQL: "SELECT n, squared FROM starter.main.sequence_table(5) ORDER BY n",
+	{SQL: "SELECT n, squared FROM hue.main.sequence_table(5) ORDER BY n",
 		Description: "The first five values and their squares"},
-	{SQL: "SELECT n FROM starter.main.sequence_table(4, step := 10) ORDER BY n",
+	{SQL: "SELECT n FROM hue.main.sequence_table(4, step := 10) ORDER BY n",
 		Description: "Four values stepping by ten"},
 }
 
@@ -81,12 +81,12 @@ func (*SequenceTable) Metadata() vgi.FunctionMetadata {
 	tags["vgi.executable_examples"] = mustJSON([]map[string]any{
 		{
 			"description":     "Three rows stepping by two",
-			"sql":             "SELECT n, squared FROM starter.main.sequence_table(3, step := 2) ORDER BY n",
+			"sql":             "SELECT n, squared FROM hue.main.sequence_table(3, step := 2) ORDER BY n",
 			"expected_result": [][]int64{{0, 0}, {2, 4}, {4, 16}},
 		},
 		{
 			"description":     "Count the rows generated",
-			"sql":             "SELECT count(*) AS rows FROM starter.main.sequence_table(1000)",
+			"sql":             "SELECT count(*) AS rows FROM hue.main.sequence_table(1000)",
 			"expected_result": [][]int64{{1000}},
 		},
 	})

@@ -10,15 +10,15 @@
 //   - Politeness. Requests time out, and 429/5xx responses are retried with
 //     backoff that honours Retry-After.
 //   - Credentials. A bearer token comes from a DuckDB secret if one exists
-//     (CREATE SECRET (TYPE starter_api, TOKEN '...')), otherwise from the
-//     STARTER_API_TOKEN environment variable. The token is read on every
+//     (CREATE SECRET (TYPE hue_api, TOKEN '...')), otherwise from the
+//     HUE_API_TOKEN environment variable. The token is read on every
 //     call and never stored in state, because state travels back to DuckDB
 //     over HTTP.
 //
 // The tests run against test/mock_api/server.py; point base_url at your real
 // API once you adapt the parsing in parsePage.
 
-package starter
+package hue
 
 import (
 	"context"
@@ -42,21 +42,21 @@ import (
 
 const (
 	// SecretType is the DuckDB secret type fetch_items reads its token from.
-	SecretType = "starter_api"
+	SecretType = "hue_api"
 	// TokenEnvVar is the fallback when no secret exists.
-	TokenEnvVar = "STARTER_API_TOKEN"
+	TokenEnvVar = "HUE_API_TOKEN"
 	// MaxAttempts bounds retries of 429/5xx responses.
 	MaxAttempts = 4
 )
 
 // userAgent identifies the worker to the API.
-const userAgent = "vgi-starter-worker/" + Version
+const userAgent = "vgi-hue-worker/" + Version
 
 // Timeout bounds every request.
 const Timeout = 30 * time.Second
 
 // APISecretType is registered with DuckDB so users can run
-// CREATE SECRET (TYPE starter_api, TOKEN '...').
+// CREATE SECRET (TYPE hue_api, TOKEN '...').
 var APISecretType = vgi.SecretTypeSpec{
 	Name:        SecretType,
 	Description: "Bearer token for the API that fetch_items reads.",
@@ -220,11 +220,11 @@ func appendString(b *array.StringBuilder, v *string) {
 }
 
 var fetchExamples = []vgi.CatalogExample{
-	{SQL: "SELECT id, name, price FROM starter.main.fetch_items('https://vgi-starter-api.query-farm.services/v1') " +
+	{SQL: "SELECT id, name, price FROM hue.main.fetch_items('https://vgi-starter-api.query-farm.services/v1') " +
 		"WHERE category = 'hardware' ORDER BY price DESC LIMIT 5",
 		Description: "The five priciest hardware items from the public demo API"},
 	{SQL: "SELECT category, count(*) AS items, avg(price) AS avg_price " +
-		"FROM starter.main.fetch_items('https://vgi-starter-api.query-farm.services/v1', page_size := 10) " +
+		"FROM hue.main.fetch_items('https://vgi-starter-api.query-farm.services/v1', page_size := 10) " +
 		"GROUP BY category ORDER BY category",
 		Description: "Summarize the API's items by category, ten per request"},
 }
@@ -246,14 +246,14 @@ func (*FetchItems) Metadata() vgi.FunctionMetadata {
 		DocLLM: "Read all items from a paginated JSON REST API at base_url and return them as " +
 			"rows (id, name, category, price). Pages are requested page_size at a time " +
 			"(named argument, default 100) and streamed to DuckDB as they arrive. If a " +
-			"DuckDB secret of type starter_api exists its token is sent as a bearer " +
-			"token; otherwise the STARTER_API_TOKEN environment variable is used. " +
+			"DuckDB secret of type hue_api exists its token is sent as a bearer " +
+			"token; otherwise the HUE_API_TOKEN environment variable is used. " +
 			"Rate-limit (429) and server errors are retried with backoff.",
 		DocMD: "## fetch_items(base_url, page_size := 100)\n\n" +
 			"Every item from a paginated REST API, streamed one page per batch.\n\n" +
-			"Authenticate with a starter_api secret or the STARTER_API_TOKEN " +
+			"Authenticate with a hue_api secret or the HUE_API_TOKEN " +
 			"environment variable:\n\n" +
-			"```sql\nCREATE SECRET (TYPE starter_api, TOKEN 'your-token');\n```",
+			"```sql\nCREATE SECRET (TYPE hue_api, TOKEN 'your-token');\n```",
 	})
 	tags["vgi.result_columns_schema"] = mustJSON([]resultColumn{
 		{Name: "id", Type: "BIGINT", Description: "Item identifier assigned by the API."},

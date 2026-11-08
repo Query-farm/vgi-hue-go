@@ -17,7 +17,7 @@ jobs:
   ci:
     # In the template repositories a vX.Y.Z tag is a template version, not a worker
     # release, so only a manual run builds there. Forks release on every tag.
-    if: ${{ github.event_name != 'push' || !startsWith(github.repository, 'Query-farm/vgi-starter-') }}
+    if: ${{ github.event_name != 'push' || !startsWith(github.repository, 'Query-farm/vgi-hue-') }}
     uses: ./.github/workflows/ci.yml
 
   release:
@@ -29,8 +29,8 @@ jobs:
     uses: Query-farm/vgi-actions/.github/workflows/go-release.yml@v1
     secrets: inherit
     with:
-      package: ./cmd/vgi-starter-worker
-      bin: vgi-starter-worker
+      package: ./cmd/vgi-hue-worker
+      bin: vgi-hue-worker
       go_version: "1.26"
       # Set to "1" if you import vgi-go/vgi/exprduckdb (Evaluate / AutoApplyFilters).
       cgo: "0"

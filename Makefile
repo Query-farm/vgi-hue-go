@@ -8,7 +8,7 @@ VGI_LINT        := uvx --prerelease=allow --from 'vgi-lint-check>=2,<3' vgi-lint
 LINT_ARGS       ?=
 GOLANGCI_LINT_VERSION ?= v2.14.0
 EXE             := $(if $(filter Windows_NT,$(OS)),.exe,)
-WORKER          := $(CURDIR)/bin/vgi-starter-worker$(EXE)
+WORKER          := $(CURDIR)/bin/vgi-hue-worker$(EXE)
 RECIPES         := $(CURDIR)/bin/recipes$(EXE)
 TOOLS           := $(CURDIR)/.tools
 HAYBARN_UNITTEST := $(TOOLS)/bin/haybarn-unittest
@@ -19,21 +19,13 @@ export CGO_ENABLED ?= 0
 
 .DEFAULT_GOAL := help
 .PHONY: help build test test-unit test-sql test-sql-all lint lint-explain lint-ai fmt check run run-http debug tools template-diff clean
-# template-only:start
-.PHONY: init
-# template-only:end
 
 help: ## List the targets
 	@awk 'BEGIN{FS=":.*## "} /^[a-zA-Z_-]+:.*## /{printf "  %-14s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 
-# template-only:start
-init: ## Rename this template: make init NAME=weather
-	@test -n "$(NAME)" || { echo "usage: make init NAME=<snake_case_name>"; exit 2; }
-	uv run --no-project python scripts/vgi_template.py init $(NAME)
-# template-only:end
 
 build: ## Build the worker and the recipes into bin/
-	go build -o $(WORKER) ./cmd/vgi-starter-worker
+	go build -o $(WORKER) ./cmd/vgi-hue-worker
 	go build -o $(RECIPES) ./examples
 
 tools: $(GOLANGCI_LINT) ## Install the pinned SQL test runner and golangci-lint into .tools
@@ -79,7 +71,7 @@ run-http: build ## Serve over HTTP on port 8000
 	$(WORKER) --http --host 127.0.0.1 --port 8000
 
 debug: build tools ## Run one query against the worker with debug logging on stderr
-	@printf "LOAD vgi;\nATTACH 'starter' (TYPE vgi, LOCATION '$(WORKER) --debug');\nSELECT starter.main.greet('debug');\n" \
+	@printf "LOAD vgi;\nATTACH 'hue' (TYPE vgi, LOCATION '$(WORKER) --debug');\nSELECT hue.main.greet('debug');\n" \
 	  | uvx --from haybarn-cli==$(HAYBARN_VERSION) haybarn -no-agent
 
 template-diff: ## Show upstream template changes since this project was created

@@ -1,4 +1,4 @@
-package starter
+package hue
 
 import (
 	"bytes"

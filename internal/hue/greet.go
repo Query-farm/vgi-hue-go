@@ -13,7 +13,7 @@
 // enforced when the query is bound, so greet('Ada', 'loud') fails with a
 // helpful error before any row runs.
 
-package starter
+package hue
 
 import (
 	"context"
@@ -58,10 +58,10 @@ type greetWithStyleArgs struct {
 // (vgi.example_queries is per SQL name) and the schema can list them all.
 var (
 	greetExamples = []vgi.CatalogExample{
-		{SQL: "SELECT starter.main.greet('Ada') AS greeting", Description: "Greet one name casually"},
+		{SQL: "SELECT hue.main.greet('Ada') AS greeting", Description: "Greet one name casually"},
 	}
 	greetWithStyleExamples = []vgi.CatalogExample{
-		{SQL: "SELECT starter.main.greet('Ada', 'formal') AS greeting", Description: "Greet one name formally"},
+		{SQL: "SELECT hue.main.greet('Ada', 'formal') AS greeting", Description: "Greet one name formally"},
 	}
 )
 
@@ -89,7 +89,7 @@ func (*Greet) Metadata() vgi.FunctionMetadata {
 			DocMD: "## greet(name)\n\n" +
 				"A casual greeting for each row: greet('Ada') returns 'Hi, Ada!'.\n\n" +
 				"NULL in, NULL out. See greet(name, style) for the formal tone.\n\n" +
-				"```sql\nSELECT starter.main.greet(name) FROM people;\n```",
+				"```sql\nSELECT hue.main.greet(name) FROM people;\n```",
 		}), greetExamples, greetWithStyleExamples),
 		Examples: greetExamples,
 	}
@@ -127,7 +127,7 @@ func (*GreetWithStyle) Metadata() vgi.FunctionMetadata {
 				"any other value is rejected when the query is planned. NULL names produce NULL.",
 			DocMD: "## greet(name, style)\n\n" +
 				"A greeting in the chosen tone: 'casual' or 'formal'.\n\n" +
-				"```sql\nSELECT starter.main.greet('Ada', 'formal');  -- Good day, Ada.\n```",
+				"```sql\nSELECT hue.main.greet('Ada', 'formal');  -- Good day, Ada.\n```",
 		}), greetExamples, greetWithStyleExamples),
 		Examples: greetWithStyleExamples,
 	}

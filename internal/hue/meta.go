@@ -8,7 +8,7 @@
 //   - Every function carries objectTags(...): a title, a category from
 //     SchemaCategories, search keywords, and LLM- and human-facing docs.
 
-package starter
+package hue
 
 import (
 	"encoding/json"
@@ -20,10 +20,10 @@ import (
 )
 
 // CatalogName is the name DuckDB attaches the worker under.
-const CatalogName = "starter"
+const CatalogName = "hue"
 
 // SourceURL is where this worker's code lives.
-const SourceURL = "https://github.com/Query-farm/vgi-starter-go"
+const SourceURL = "https://github.com/your-org/vgi-hue"
 
 // category is one entry of the schema's vgi.categories list.
 type category struct {
@@ -132,7 +132,7 @@ const catalogDocLLM = "An example VGI worker generated from the Query.Farm start
 	"your own functions; keep the metadata complete so agents can discover and call them."
 
 // CatalogDocMD is the catalog's long human-facing description (also its comment).
-const CatalogDocMD = "# VGI starter worker\n\n" +
+const CatalogDocMD = "# VGI hue worker\n\n" +
 	"**An example [VGI](https://query.farm/vgi) worker that brings custom functions into DuckDB " +
 	"SQL.** It was generated from the Query.Farm starter template and is meant to be renamed and " +
 	"rewritten: every function here demonstrates one pattern you will reuse.\n\n" +
@@ -153,7 +153,7 @@ const schemaDocLLM = "The `main` schema holds the starter template's example fun
 	"`count` rows of `(n, squared)`; use it for demos, tests, and as a template for generators. " +
 	"`fetch_items(base_url, page_size := 100)` reads every item from a paginated JSON REST API as " +
 	"`(id, name, category, price)` rows, streaming one page per batch, retrying rate-limited " +
-	"requests, and authenticating with a `starter_api` DuckDB secret or the `STARTER_API_TOKEN` " +
+	"requests, and authenticating with a `hue_api` DuckDB secret or the `HUE_API_TOKEN` " +
 	"environment variable. Scalars cannot take named arguments; table functions can."
 
 // SchemaDocMD is the main schema's human-facing description (also its comment).
@@ -171,8 +171,8 @@ type agentTask struct {
 
 // agentTestTasks are graded privately by vgi-agent-tests.yaml.
 var agentTestTasks = []agentTask{
-	{Name: "formal_greeting", Prompt: "Using the starter worker, greet the name 'Grace' formally."},
-	{Name: "sum_of_squares", Prompt: "Using the starter worker, what is the sum of the squared column for the first 10 rows " +
+	{Name: "formal_greeting", Prompt: "Using the hue worker, greet the name 'Grace' formally."},
+	{Name: "sum_of_squares", Prompt: "Using the hue worker, what is the sum of the squared column for the first 10 rows " +
 		"of the sequence with the default step?"},
 	{Name: "stepped_sequence", Prompt: "List the n values of a 4-row sequence that steps by 5, in ascending order."},
 	{Name: "items_per_category", Prompt: "The items API is running at https://vgi-starter-api.query-farm.services/v1. How many items does it have in each category?"},
@@ -180,7 +180,7 @@ var agentTestTasks = []agentTask{
 
 // CatalogTags are the catalog-level discovery tags.
 var CatalogTags = map[string]string{
-	"vgi.title":              "VGI Starter Worker",
+	"vgi.title":              "VGI Hue Worker",
 	"vgi.doc_llm":            catalogDocLLM,
 	"vgi.doc_md":             CatalogDocMD,
 	"vgi.source_url":         SourceURL,
@@ -198,7 +198,7 @@ var CatalogTags = map[string]string{
 // schemaTags builds the main schema's tags; allExamples feeds vgi.example_queries.
 func schemaTags(allExamples []exampleQuery) map[string]string {
 	return map[string]string{
-		"vgi.title":           "Starter Functions",
+		"vgi.title":           "Hue Functions",
 		"domain":              "examples",
 		"vgi.keywords":        keywordsArray("greeting, sequence, generator, rest api, pagination"),
 		"vgi.doc_llm":         schemaDocLLM,

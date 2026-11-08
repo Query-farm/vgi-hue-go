@@ -1,18 +1,18 @@
-// Package starter assembles the example functions into a catalog.
+// Package hue assembles the example functions into a catalog.
 //
 // To add a function: write it (see greet.go / sequence.go / fetch_items.go),
 // then register it in NewWorker below.
 //
 // Run it:
 //
-//	vgi-starter-worker                      # stdio: what DuckDB launches by default
-//	vgi-starter-worker --http --port 8000   # HTTP: for Docker / hosted deploys
-//	vgi-starter-worker --help
+//	vgi-hue-worker                      # stdio: what DuckDB launches by default
+//	vgi-hue-worker --http --port 8000   # HTTP: for Docker / hosted deploys
+//	vgi-hue-worker --help
 //
 // Attach it from DuckDB:
 //
-//	ATTACH 'starter' (TYPE vgi, LOCATION '/abs/path/to/bin/vgi-starter-worker');
-package starter
+//	ATTACH 'hue' (TYPE vgi, LOCATION '/abs/path/to/bin/vgi-hue-worker');
+package hue
 
 import (
 	"github.com/Query-farm/vgi-go/vgi"
