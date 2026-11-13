@@ -20,19 +20,30 @@ Faster loops while iterating: `make test-unit`, `make test-sql`, `make lint-expl
 
 ## Layout
 
+This worker exposes Philips Hue lights (CLIP v2 API) as the `hue` catalog: the
+`lights` (writable), `rooms`, `scenes` and `sensors` tables, and the control
+functions `set_light`, `set_room`, `recall_scene`, `set_gradient` and `set_lights`.
+README.md documents them for users.
+
 ```
 cmd/vgi-hue-worker/  # main.go: the worker binary (flags -> serve.Main)
 internal/hue/
-  worker.go        # assembles the catalog; register new functions in NewWorker
+  worker.go        # NewWorker: assembles the catalog; register new tables/functions here
   meta.go          # catalog/schema metadata + helpers (objectTags, column)
-  greet.go         # scalar example (overloads, constant arg with choices)
-  sequence.go      # table function example (named args, streaming state)
-  fetch_items.go   # REST API table function (pagination, retries, secrets)
+  attach.go        # bridge / app_key (secret) / transactional ATTACH options, read via AttachOptions()
+  discovery.go     # bridge discovery: cache, mDNS, discovery.meethue.com
+  hue.go           # Hue CLIP v2 client (retries, timeouts), colour math, PUT bodies
+  inventory.go     # lights / rooms / scenes / sensors catalog tables (column specs, scans)
+  lights_write.go  # UPDATE hue.main.lights
+  control.go       # set_light / set_room / recall_scene / set_gradient table fns, set_lights table in-out
+  transactions.go  # sendAll (paced, pipelined PUTs), staged requests (SQLite), COMMIT with restore, ROLLBACK
+  sqlite_wal.go    # shared staging database in WAL mode
+  examples.go      # functionExamples (per function) and the executable examples
   version.go       # the worker version (checked against release tags)
-  *_test.go        # go test unit tests
+  *_test.go        # go test unit tests (use httptest bridges, never a real one)
 internal/serve/    # --http / --unix / stdio and logging flags, shared with recipes
 test/sql/          # sqllogictest files run through DuckDB
-test/mock_api/     # offline mock of the REST API used by tests
+test/mock_bridge/  # stateful offline mock of a Hue bridge used by every SQL test and vgi-lint
 examples/          # recipes (one package main, served by bin/recipes <name>)
 ci/                # integration harness used by `make test-sql` and CI
 scripts/           # vgi_template.py (init / template-diff)
@@ -41,18 +52,20 @@ vgi-agent-tests.yaml  # private graders for the agent test tasks
 
 ## Recipe: add a function
 
-1. Create `internal/hue/<name>.go`. Copy the closest example: `greet.go` for a
-   scalar, `sequence.go` for a generator, `fetch_items.go` for an API.
+1. Create `internal/hue/<name>.go`, or extend `inventory.go` (read-only tables) /
+   `control.go` (commands). Read the bridge connection with `callInfoOf(p).connect()`
+   (`attach.go`), and send changes through `senderFor(ci, conn)` so they are paced and
+   staged in a transactional attach. Bind must not contact the bridge.
 2. Declare arguments as a struct with `vgi:"..."` tags. Use `pos=N` for positional
-   arguments and `default=V` (no `pos`) for named ones; add `ge=`, `le=`, `pattern=` or
-   `choices='a,b'` constraints. Scalar column arguments are `*array.String` (etc.) fields
-   with `const=false`. `doc=` must be the last key in the tag.
-3. Implement `Name()`, `Metadata()` (with `Description`, `Tags: withExamples(objectTags(...), examples)`
-   and `Examples`), then `OnBindTyped`/`ProcessTyped` (scalar, wrap with
-   `vgi.AsScalarFunction[Args]`) or `ArgumentSpecs`/`OnBind`/`NewState`/`Process` (table,
-   wrap with `vgi.AsTableFunction[State]`).
-4. Register it in `NewWorker` in `internal/hue/worker.go`, and add its examples to
-   `allExamples`.
+   arguments and `name=...` / `default=V` (no `pos`) for named ones; add `ge=`, `le=`,
+   `pattern=` or `choices='a,b'` constraints. `doc=` must be the last key in the tag, or
+   set docs afterwards with `withDocs` as `control.go` does.
+3. Implement `Name()`, `Metadata()` (wrap it with `withExamples(name, ...)` and add the
+   queries to `functionExamples` in `examples.go`), then `ArgumentSpecs`/`OnBind`/`NewState`/
+   `Process` (table, wrap with `vgi.AsTableFunction[State]`) or the table in-out
+   equivalent (`vgi.AsTableInOutFunction`, like `set_lights`).
+4. Register it in `NewWorker` in `internal/hue/worker.go`. A new table is an entry in
+   `inventories` (`inventory.go`).
 
 Then, for every new function:
 
@@ -117,17 +130,24 @@ Recipes for most kinds are in `examples/`.
   published so DuckDB and agents can discover them, but SDKs differ in which ones they
   enforce: some skip named table arguments, C# enforces none, and `pattern` matching
   differs (Java requires a full match). Where its SDK doesn't enforce a constraint, the
-  hue re-checks it in bind code. Do the same, and on a columnar scalar argument validate
+  worker re-checks it in bind code. Do the same, and on a columnar scalar argument validate
   values in the compute body.
 - **Reserved argument names.** DuckDB keywords such as `interval`, `end`, `from`, `order`
   and `table` break `name := value` syntax. Pick another name (`start_date`, `end_date`).
 - **State must be serializable.** Table-function state (the `S` in `TypedTableFunc[S]`) is gob-encoded into the HTTP continuation token between batches, because each batch can be served by a different request or process. Keep the cursor in *exported* fields (gob silently drops unexported ones, so the scan would restart from row 0), keep it small, and never put secrets in it.
 - **Examples must be deterministic.** Add `ORDER BY`, and no `now()`, random values or
   network. Examples that hit a live API go in `examples`, not `executable_examples`.
-- **Credentials.** Read them from a DuckDB secret first (`CREATE SECRET (TYPE hue_api, …)`),
-  then from an environment variable. Never put them in logs, examples or the repo, and
-  keep them out of table-function state unless the state rule above says
-  the SDK encrypts it. Workers that need real credentials set `execute: false` on the metadata check.
+- **Credentials.** The bridge key arrives as the secret `app_key` ATTACH option (falling
+  back to `HUE_APP_KEY`); read it with the SDK's `AttachOptions()` (see `optionsOf` in
+  `attach.go`), never pack it into attach bytes or table-function state. Never put it in
+  logs, examples, test fixtures or the repo; examples use `app_key getenv('HUE_APP_KEY')`.
+  CI and vgi-lint run against the mock bridge with a fake key, so examples still execute.
+- **Never touch a real bridge from tests.** Unit tests use `httptest` servers and SQL tests
+  use `test/mock_bridge/server.py`; `ci/run-integration.sh` and `ci/lint.sh` unset
+  `HUE_BRIDGE` / `HUE_APP_KEY`. Add mock-bridge fixtures for new resources.
+- **Pacing.** Hue allows about 10 light commands and 1 room/scene command per second. Go
+  through `senderFor` / `sendAll` (`transactions.go`), which paces, pipelines and keeps per-light
+  order; never loop over raw PUTs.
 - **Errors.** Raise errors with a clear message. For HTTP failures, include the status
   code. DuckDB shows the message to the user.
 - **Rate limits.** Retry 429 and 5xx with backoff, honour `Retry-After`, and set timeouts on
@@ -165,14 +185,17 @@ Recipes for most kinds are in `examples/`.
   needed only for the optional shared-memory transport (`VGI_RPC_SHM_SIZE_BYTES`), so this
   template leaves it out. Add it from the vgi-go README if you enable SHM.
 - Recipes: all six are implemented in Go (see `examples/`).
+- The transaction store uses the pure-Go `modernc.org/sqlite` (no cgo); its location is
+  `HUE_TX_DIR`, else the user cache dir.
+- `HUE_DEBUG=1` (stderr) or `HUE_DEBUG=/abs/file.log` traces bridge requests (`logDebug`).
 - Dependencies go in `go.mod` (`go get`, then `go mod tidy`). Keep them few: every
   dependency ships to every user of the worker.
 - Gates: `gofmt`, `go vet`, `golangci-lint` (config in `.golangci.yml`), `go test`.
 
 ## Useful prompts
 
-- "Add a scalar `slugify(text VARCHAR) -> VARCHAR` with full metadata and tests."
-- "Replace `fetch_items` with a table function for <API>. Map its JSON to typed columns,
-  read the token from a `hue_api` secret, and add mock-server tests."
+- "Add a `devices` table listing every Hue device with its product data, with mock-bridge
+  fixtures and SQL tests."
+- "Add a `brightness_step` argument to `set_room` with full metadata and tests."
 - "Add a catalog table `countries` (code, name) with a primary key, following
   `examples/catalog_tables`."
