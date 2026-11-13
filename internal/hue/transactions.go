@@ -157,11 +157,15 @@ func coalesce(reqs []stagedRequest) []stagedRequest {
 			for _, e := range r.Body {
 				merged = merged.set(e.K, e.V)
 			}
+			// A later colour, white or gradient replaces an earlier one.
 			if r.Body.has("color") {
-				merged = merged.without("color_temperature")
+				merged = merged.without("color_temperature", "gradient")
 			}
 			if r.Body.has("color_temperature") {
-				merged = merged.without("color")
+				merged = merged.without("color", "gradient")
+			}
+			if r.Body.has("gradient") {
+				merged = merged.without("color", "color_temperature")
 			}
 			out[n-1].Body = merged
 		} else {
@@ -180,7 +184,17 @@ func restoreBody(l hueLight) omap {
 	if l.ColorTemperature != nil && l.ColorTemperature.Mirek != nil {
 		body = body.set("color_temperature", omap{{"mirek", *l.ColorTemperature.Mirek}})
 	} else if l.Color != nil && l.Color.XY != nil {
-		body = body.set("color", omap{{"xy", omap{{"x", l.Color.XY.X}, {"y", l.Color.XY.Y}}}})
+		body = body.set("color", xyBody(*l.Color.XY))
+	}
+	if g := l.Gradient; g != nil && len(g.Points) > 0 {
+		mode := ""
+		if g.Mode != nil {
+			mode = *g.Mode
+		}
+		body = body.set("gradient", gradientBody(g.xys(), mode))
+	}
+	if e := l.Effects; e != nil && e.Status != nil && *e.Status != "" {
+		body = body.set("effects", omap{{"effect", *e.Status}})
 	}
 	return body
 }
@@ -273,23 +287,19 @@ func commitTransaction(opts BridgeOptions, tx []byte) error {
 	if err != nil {
 		return err
 	}
-	sent := 0
-	for _, r := range reqs {
-		pace(r.Kind)
-		if _, err := hueRequest(conn, "PUT", r.path(), r.Body); err != nil {
-			restored := 0
-			if sent > 0 {
-				restored = restoreLights(conn, touched, before)
-			}
-			msg := fmt.Sprintf("COMMIT failed after %d of %d light changes: %s. ", sent, len(reqs), err.Error())
-			if sent > 0 {
-				msg += fmt.Sprintf("Restored %d light(s) to their state before the commit.", restored)
-			} else {
-				msg += "Nothing was changed."
-			}
-			return &HueError{Msg: msg}
+	sent, err := sendAll(conn, reqs)
+	if err != nil {
+		restored := 0
+		if sent > 0 {
+			restored = restoreLights(conn, touched, before)
 		}
-		sent++
+		msg := fmt.Sprintf("COMMIT failed after %d of %d light changes: %s. ", sent, len(reqs), err.Error())
+		if sent > 0 {
+			msg += fmt.Sprintf("Restored %d light(s) to their state before the commit.", restored)
+		} else {
+			msg += "Nothing was changed."
+		}
+		return &HueError{Msg: msg}
 	}
 	return nil
 }
@@ -359,14 +369,86 @@ type sender func(reqs []stagedRequest) (staged bool, err error)
 
 func immediate(conn BridgeConnection) sender {
 	return func(reqs []stagedRequest) (bool, error) {
-		for _, r := range reqs {
-			pace(r.Kind)
-			if _, err := hueRequest(conn, "PUT", r.path(), r.Body); err != nil {
-				return false, err
-			}
-		}
-		return false, nil
+		_, err := sendAll(conn, reqs)
+		return false, err
 	}
+}
+
+// sendAll PUTs reqs to the bridge, pipelined, and returns how many succeeded.
+//
+//   - Starts are paced: each request starts on its pace slot (lightCommandGap
+//     for lights, groupCommandGap for grouped_light/scene), without waiting
+//     for earlier responses, and at most maxInFlightRequests run at once.
+//   - Requests run in order per target: a target's next request starts only
+//     after its previous one completed. A grouped_light or scene request
+//     covers many lights, so it is a barrier: it starts after everything
+//     before it completed, and nothing after it starts until it completed.
+//   - hueRequest retries 429/503/network errors per request, as before.
+//   - On the first error no new request starts; sendAll waits for the ones in
+//     flight and returns that error. Requests already sent stay applied.
+func sendAll(conn BridgeConnection, reqs []stagedRequest) (int, error) {
+	var (
+		mu       sync.Mutex
+		firstErr error
+		ok       int
+		wg       sync.WaitGroup
+	)
+	failed := func() bool { mu.Lock(); defer mu.Unlock(); return firstErr != nil }
+	slots := make(chan struct{}, maxInFlightRequests)
+	last := map[string]chan struct{}{} // target -> closed once its latest request completed
+	var started []chan struct{}        // every request started since the last barrier
+	var barrier chan struct{}          // the latest grouped_light/scene request
+	waitAll := func(chs []chan struct{}) {
+		for _, ch := range chs {
+			<-ch
+		}
+	}
+	for _, r := range reqs {
+		isBarrier := r.Kind != "light"
+		key := r.Kind + "/" + r.Target
+		if barrier != nil {
+			<-barrier
+		}
+		if isBarrier {
+			waitAll(started)
+		} else if prev := last[key]; prev != nil {
+			<-prev
+		}
+		if failed() {
+			break
+		}
+		slots <- struct{}{}
+		pace(r.Kind)
+		if failed() {
+			<-slots
+			break
+		}
+		done := make(chan struct{})
+		last[key] = done
+		if isBarrier {
+			barrier, started = done, nil
+		} else {
+			started = append(started, done)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer close(done)
+			_, err := hueRequest(conn, "PUT", r.path(), r.Body)
+			// Record the outcome before freeing the slot, so the loop sees a
+			// failure before it can start another request.
+			mu.Lock()
+			if err != nil && firstErr == nil {
+				firstErr = err
+			} else if err == nil {
+				ok++
+			}
+			mu.Unlock()
+			<-slots
+		}()
+	}
+	wg.Wait()
+	return ok, firstErr
 }
 
 func senderFor(ci callInfo, conn BridgeConnection) sender {

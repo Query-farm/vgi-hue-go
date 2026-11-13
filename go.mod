@@ -5,7 +5,7 @@ go 1.26.0
 replace github.com/google/flatbuffers => github.com/rustyconover/flatbuffers v25.12.20-0.20261026151427-0acd09bcd1ff+incompatible
 
 require (
-	github.com/Query-farm/vgi-go v0.40.4
+	github.com/Query-farm/vgi-go v0.42.0
 	github.com/Query-farm/vgi-rpc-go v0.37.0
 	github.com/apache/arrow-go/v18 v18.7.0
 	modernc.org/sqlite v1.56.0

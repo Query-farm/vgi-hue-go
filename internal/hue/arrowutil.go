@@ -11,7 +11,7 @@ import (
 )
 
 // row is one table row keyed by column name. Values: string, bool, float64,
-// int32, int64, []string, nil.
+// int32, int64, []string, []any (lists), map[string]any (structs), nil.
 type row map[string]any
 
 // columns are rows in column-major form.
@@ -68,19 +68,32 @@ func appendValue(b array.Builder, v any) error {
 		}
 		bb.Append(arrow.Timestamp(x))
 	case *array.ListBuilder:
-		xs, ok := v.([]string)
-		if !ok {
-			return fmt.Errorf("want []string, got %T", v)
+		var xs []any
+		switch l := v.(type) {
+		case []string:
+			for _, s := range l {
+				xs = append(xs, s)
+			}
+		case []any:
+			xs = l
+		default:
+			return fmt.Errorf("want a list, got %T", v)
 		}
 		bb.Append(true)
-		vb := bb.ValueBuilder().(*array.StringBuilder)
-		for _, s := range xs {
-			vb.Append(s)
+		for i, x := range xs {
+			if err := appendValue(bb.ValueBuilder(), x); err != nil {
+				return fmt.Errorf("element %d: %w", i, err)
+			}
 		}
 	case *array.StructBuilder:
-		r, ok := v.(row)
-		if !ok {
-			return fmt.Errorf("want row, got %T", v)
+		var r map[string]any
+		switch m := v.(type) {
+		case row:
+			r = m
+		case map[string]any:
+			r = m
+		default:
+			return fmt.Errorf("want a struct, got %T", v)
 		}
 		bb.Append(true)
 		st := bb.Type().(*arrow.StructType)
@@ -168,11 +181,23 @@ func cellValue(arr arrow.Array, i int) any {
 		return int64(a.Value(i))
 	case *array.List:
 		start, end := a.ValueOffsets(i)
-		var out []string
+		out := make([]any, 0, end-start)
 		for j := start; j < end; j++ {
-			if v, ok := cellValue(a.ListValues(), int(j)).(string); ok {
-				out = append(out, v)
-			}
+			out = append(out, cellValue(a.ListValues(), int(j)))
+		}
+		return out
+	case *array.LargeList:
+		start, end := a.ValueOffsets(i)
+		out := make([]any, 0, end-start)
+		for j := start; j < end; j++ {
+			out = append(out, cellValue(a.ListValues(), int(j)))
+		}
+		return out
+	case *array.Struct:
+		st := a.DataType().(*arrow.StructType)
+		out := map[string]any{}
+		for k, f := range st.Fields() {
+			out[f.Name] = cellValue(a.Field(k), i)
 		}
 		return out
 	}
@@ -198,6 +223,30 @@ func same(a, b any) bool {
 			return strings.EqualFold(sa, sb)
 		}
 		return false
+	}
+	switch la := a.(type) {
+	case []any: // lists element-wise
+		lb, ok := b.([]any)
+		if !ok || len(la) != len(lb) {
+			return false
+		}
+		for i := range la {
+			if !same(la[i], lb[i]) {
+				return false
+			}
+		}
+		return true
+	case map[string]any: // structs field-wise
+		mb, ok := b.(map[string]any)
+		if !ok || len(la) != len(mb) {
+			return false
+		}
+		for k, v := range la {
+			if !same(v, mb[k]) {
+				return false
+			}
+		}
+		return true
 	}
 	fa, oka := numOrBool(a)
 	fb, okb := numOrBool(b)

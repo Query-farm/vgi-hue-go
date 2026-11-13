@@ -49,6 +49,8 @@ var (
 	i32T   = arrow.PrimitiveTypes.Int32
 	i64T   = arrow.PrimitiveTypes.Int64
 	tsUTCT = &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
+	// xyStructT is STRUCT(x DOUBLE, y DOUBLE), one gradient point.
+	xyStructT = arrow.StructOf(arrow.Field{Name: "x", Type: f64T, Nullable: true}, arrow.Field{Name: "y", Type: f64T, Nullable: true})
 )
 
 // rowIDField is DuckDB's conventional rowid (vgi.RowIDField), with a comment.
@@ -69,9 +71,21 @@ var LIGHTS = makeResultCols([]colSpec{
 	{"brightness", f64T, "DOUBLE", "Brightness in percent (0–100); NULL for on/off-only lights.", true},
 	{"color_mode", utf8T, "VARCHAR", "'color_temperature', 'xy', or NULL for white-only/dimmable lights.", true},
 	{"color_temperature_kelvin", i32T, "INTEGER", "Colour temperature in Kelvin when in color_temperature mode.", true},
-	{"color_x", f64T, "DOUBLE", "CIE 1931 x chromaticity coordinate of the current colour, 0–1.", true},
-	{"color_y", f64T, "DOUBLE", "CIE 1931 y chromaticity coordinate of the current colour, 0–1.", true},
+	{"color_x", f64T, "DOUBLE", "CIE 1931 x chromaticity of the current colour, 0–1 (unitless). Updatable: SET color_x/color_y sends that xy " +
+		"directly (the other coordinate keeps its current value); the bridge may clamp it to the lamp's gamut.", true},
+	{"color_y", f64T, "DOUBLE", "CIE 1931 y chromaticity of the current colour, 0–1 (unitless). Updatable together with or without color_x; see color_x.", true},
 	{"color_hex", utf8T, "VARCHAR", "Approximate current colour as '#rrggbb' (full brightness).", true},
+	{"gradient_hex", arrow.ListOf(utf8T), "VARCHAR[]", "Gradient points as '#rrggbb' (full-brightness approximation), or NULL for lights " +
+		"without a gradient. Updatable: SET it to 2..gradient_points_capable colours.", true},
+	{"gradient_xy", arrow.ListOf(xyStructT), "STRUCT(x DOUBLE, y DOUBLE)[]", "The same gradient points as CIE 1931 xy (each 0–1), or NULL " +
+		"for lights without a gradient. Updatable like gradient_hex, without the hex round trip.", true},
+	{"gradient_mode", utf8T, "VARCHAR", "How the gradient points are spread over the light: 'interpolated_palette', " +
+		"'interpolated_palette_mirrored', 'random_pixelated' or 'segmented_palette' (whatever the light lists); NULL for lights " +
+		"without a gradient. Updatable.", true},
+	{"gradient_points_capable", i32T, "INTEGER", "Maximum number of gradient points the light accepts; NULL for lights without a gradient.", true},
+	{"gradient_pixel_count", i32T, "INTEGER", "Number of individually lit segments of the gradient light; NULL for lights without a gradient.", true},
+	{"effect", utf8T, "VARCHAR", "Running light effect, e.g. 'candle', 'fire', 'prism'; 'no_effect' when none; NULL for lights without " +
+		"effects. Updatable: SET effect = 'no_effect' stops it.", true},
 	{"reachable", boolT, "BOOLEAN", "Whether the bridge can currently reach the light over Zigbee.", true},
 	{"product_name", utf8T, "VARCHAR", "Product name, e.g. 'Hue color lamp'.", true},
 	{"model_id", utf8T, "VARCHAR", "Hardware model id, e.g. 'LCA001'.", true},
@@ -184,6 +198,26 @@ func lightRows(lights []hueLight, devices []hueDevice, groups []hueGroup, zigbee
 		if hasXY {
 			r["color_x"], r["color_y"] = l.Color.XY.X, l.Color.XY.Y
 		}
+		// Capabilities the UPDATE checks (hidden: not table columns).
+		r[capColor] = l.Color != nil
+		if g := l.Gradient; g != nil {
+			r[capGradient] = g
+			setGradientCols(r, g.xys())
+			r["gradient_mode"] = strp(g.Mode)
+			if g.PointsCapable != nil {
+				r["gradient_points_capable"] = *g.PointsCapable
+			}
+			if g.PixelCount != nil {
+				r["gradient_pixel_count"] = *g.PixelCount
+			}
+		}
+		if e := l.Effects; e != nil {
+			r[capEffects] = append([]string{}, e.EffectValues...)
+			r["effect"] = "no_effect"
+			if e.Status != nil && *e.Status != "" {
+				r["effect"] = *e.Status
+			}
+		}
 		if v, ok := reach[l.Owner.Rid]; ok {
 			r["reachable"] = v
 		}
@@ -211,7 +245,48 @@ func loadLightRows(conn BridgeConnection) ([]row, error) {
 	return lightRows(lights, devices, rooms, zigbee)
 }
 
+// Hidden row keys holding a light's capabilities (not table columns, so
+// never emitted): whether it has a colour gamut, its *hueGradient, and its
+// effect values.
+const (
+	capColor    = "_color_capable"
+	capGradient = "_gradient"
+	capEffects  = "_effect_values"
+)
+
+// setGradientCols sets gradient_xy and gradient_hex from points.
+func setGradientCols(r row, points []xyPoint) {
+	xys, hexes := make([]any, len(points)), make([]any, len(points))
+	for i, p := range points {
+		xys[i] = map[string]any{"x": p.X, "y": p.Y}
+		hexes[i] = xyToHex(p.X, p.Y)
+	}
+	r["gradient_xy"], r["gradient_hex"] = xys, hexes
+}
+
+// xyOf reads a {"x":..,"y":..} body object.
+func xyOf(m omap) xyPoint {
+	xv, _ := m.get("x")
+	yv, _ := m.get("y")
+	x, _ := num(xv)
+	y, _ := num(yv)
+	return xyPoint{x, y}
+}
+
+// gradientPoints reads the points of a gradient body object.
+func gradientPoints(g omap) []xyPoint {
+	v, _ := g.get("points")
+	pts, _ := v.([]any)
+	out := make([]xyPoint, 0, len(pts))
+	for _, p := range pts {
+		o, _ := p.(omap)
+		out = append(out, xyOf(o.sub("color").sub("xy")))
+	}
+	return out
+}
+
 // applyToRow returns the row as it reads once the bridge has applied body.
+// Colours read back as requested (a real bridge may clamp xy to the gamut).
 func applyToRow(old row, body omap) row {
 	r := row{}
 	for k, v := range old {
@@ -234,13 +309,33 @@ func applyToRow(old row, body omap) row {
 			r["color_mode"], r["color_temperature_kelvin"], r["color_hex"] = "color_temperature", k, kelvinToHex(float64(k))
 		}
 	}
+	// A single colour or white replaces a gradient light's gradient.
+	if (body.has("color") || body.has("color_temperature")) && r["gradient_xy"] != nil {
+		r["gradient_xy"], r["gradient_hex"] = []any{}, []any{}
+	}
 	if c := body.sub("color"); c != nil {
-		xy := c.sub("xy")
-		xv, _ := xy.get("x")
-		yv, _ := xy.get("y")
-		x, _ := num(xv)
-		y, _ := num(yv)
+		p := xyOf(c.sub("xy"))
+		x, y := p.X, p.Y
 		r["color_mode"], r["color_temperature_kelvin"], r["color_x"], r["color_y"], r["color_hex"] = "xy", nil, x, y, xyToHex(x, y)
+	}
+	if g := body.sub("gradient"); g != nil {
+		if g.has("points") {
+			pts := gradientPoints(g)
+			setGradientCols(r, pts)
+			// The bridge sets the light's colour to the first gradient point.
+			if len(pts) > 0 {
+				x, y := pts[0].X, pts[0].Y
+				r["color_mode"], r["color_temperature_kelvin"], r["color_x"], r["color_y"], r["color_hex"] = "xy", nil, x, y, xyToHex(x, y)
+			}
+		}
+		if v, ok := g.get("mode"); ok {
+			r["gradient_mode"] = v
+		}
+	}
+	if e := body.sub("effects"); e != nil {
+		if v, ok := e.get("effect"); ok {
+			r["effect"] = v
+		}
 	}
 	if md := body.sub("metadata"); md != nil {
 		if v, ok := md.get("name"); ok {
@@ -519,7 +614,7 @@ func (f scanFn) Metadata() vgi.FunctionMetadata {
 		md.ProjectionPushdown = true
 		tags := objectTags(docs{Title: "Lights (scan with rowid)", Category: "inventory", Keywords: "hue, lights, scan, rowid, update",
 			DocLLM: "The table function behind `hue.main.lights`: the same rows, plus DuckDB's `rowid`. " +
-				"Query the `hue.main.lights` table instead; this function exists so DuckDB can scan the table for UPDATE.",
+				"It is table-only (not callable from SQL): query the `hue.main.lights` table instead; DuckDB uses this function to scan the table, including for UPDATE.",
 			DocMD: "## lights_scan()\n\nThe scan behind `hue.main.lights`; query the table instead."})
 		md.Tags = tags
 	}
@@ -610,7 +705,8 @@ var lightsInv = &inventory{
 	},
 	tags: tableTags("Hue Lights", "inventory", "hue, lights, bulbs, brightness, colour, state",
 		"Every light on the attached Hue bridge with its current state. Writable with UPDATE: "+
-			"is_on, brightness, color_temperature_kelvin, color_hex and name.",
+			"is_on, brightness, color_temperature_kelvin, color_x/color_y (CIE xy) or color_hex, "+
+			"gradient_hex or gradient_xy and gradient_mode (gradient lights), effect, and name.",
 		[]exampleQuery{{Description: "How many lights are on in each room",
 			SQL: "SELECT room, count(*) FILTER (WHERE is_on) AS lit FROM hue.main.lights GROUP BY room ORDER BY room"}}),
 }

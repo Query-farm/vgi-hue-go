@@ -162,6 +162,7 @@ var agentTestTasks = []agentTask{
 // CatalogTags are the catalog-level discovery tags.
 var CatalogTags = map[string]string{
 	"vgi.title":              "VGI Hue Worker",
+	"vgi.subtitle":           "Read and control Philips Hue lights, rooms, scenes and sensors from SQL.",
 	"vgi.doc_llm":            catalogDocLLM,
 	"vgi.doc_md":             CatalogDocMD,
 	"vgi.source_url":         SourceURL,

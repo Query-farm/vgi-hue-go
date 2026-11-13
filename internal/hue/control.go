@@ -555,3 +555,117 @@ func (setLightsFn) Process(_ context.Context, p *vgi.ProcessParams, _ *NoState, 
 	}
 	return emitResult(out, nil, rows)
 }
+
+// -------------------------------------------------------------- set_gradient
+
+const defaultGradientMode = "interpolated_palette"
+
+type setGradientArgs struct {
+	Light  string   `vgi:"pos=0"`
+	Colors []string `vgi:"pos=1"`
+	Mode   *string  `vgi:"name=mode,default=interpolated_palette"`
+}
+
+var setGradientArgSpecs = withDocs(vgi.DeriveArgSpecs(setGradientArgs{}), map[string]string{
+	"light":  "Light id or name (case-insensitive), as for set_light; every light with that name is changed. It must be a gradient light.",
+	"colors": "The gradient points, first to last, as '#rrggbb' strings (or basic colour names): 2 to the light's gradient_points_capable.",
+	"mode": "Named, optional: how the points are spread over the light. Each gradient light has its own set of modes; " +
+		"hue.main.lights shows the current one in gradient_mode. Default interpolated_palette.",
+})
+
+// gradientArgs reads and checks set_gradient's arguments: the light, the
+// points as xy and the mode (the light-specific checks need the light, so
+// they run in Process).
+func gradientArgs(args *vgi.Arguments) (string, []xyPoint, string, error) {
+	light, err := args.GetScalarString(0)
+	if err != nil {
+		return "", nil, "", err
+	}
+	mode := defaultGradientMode
+	var a struct {
+		Mode *string `vgi:"name=mode"`
+	}
+	if err := vgi.BindArgs(args, &a); err != nil {
+		return "", nil, "", err
+	}
+	if a.Mode != nil && *a.Mode != "" {
+		mode = *a.Mode
+	}
+	// The list is read as is (not through BindArgs) so a NULL element is seen.
+	var colors []any
+	if col, err := args.GetColumn(1); err == nil && col.Len() > 0 {
+		colors, _ = cellValue(col, 0).([]any)
+	}
+	if len(colors) == 0 {
+		return "", nil, "", hueErr("set_gradient needs at least two colours")
+	}
+	points, err := hexesToXY(colors)
+	return light, points, mode, err
+}
+
+type setGradientFn struct{}
+
+var _ vgi.TypedTableFunc[DoneState] = setGradientFn{}
+
+func (setGradientFn) Name() string { return "set_gradient" }
+func (setGradientFn) Metadata() vgi.FunctionMetadata {
+	tags := controlT("Set Gradient", "hue, gradient, lightstrip, colours, palette",
+		"Set the gradient points of one gradient light (by id or case-insensitive name) from a list of '#rrggbb' colours, "+
+			"with mode := 'interpolated_palette' (default), 'interpolated_palette_mirrored', 'random_pixelated' or 'segmented_palette'. "+
+			"The light must have a gradient (gradient_points_capable in hue.main.lights is not NULL); 2 to gradient_points_capable colours. "+
+			"The same as UPDATE hue.main.lights SET gradient_hex = [...], gradient_mode = '...'.")
+	return vgi.FunctionMetadata{Description: "Set the gradient of a gradient light (lightstrip, Play bar...) from a list of '#rrggbb' colours",
+		Stability: vgi.StabilityVolatile, Tags: tags}
+}
+func (setGradientFn) ArgumentSpecs() []vgi.ArgSpec { return setGradientArgSpecs }
+func (setGradientFn) OnBind(p *vgi.BindParams) (*vgi.BindResponse, error) {
+	if _, _, _, err := gradientArgs(p.Args); err != nil {
+		return nil, err
+	}
+	return &vgi.BindResponse{OutputSchema: RESULT.Schema}, nil
+}
+func (setGradientFn) NewState(*vgi.ProcessParams) (*DoneState, error) { return &DoneState{}, nil }
+func (setGradientFn) Process(_ context.Context, p *vgi.ProcessParams, st *DoneState, out *vgirpc.OutputCollector) error {
+	if st.Done {
+		return out.Finish()
+	}
+	ci := callInfoOf(p)
+	conn, err := ci.connect()
+	if err != nil {
+		return err
+	}
+	target, points, mode, err := gradientArgs(p.Args)
+	if err != nil {
+		return err
+	}
+	lights, err := getResources[hueLight](conn, "light")
+	if err != nil {
+		return err
+	}
+	matches := matchByIDOrName(lights, lightID, lightMD, target)
+	if len(matches) == 0 {
+		return hueErr("no light with id or name '%s'. Lights: %s", target, known(lights, lightMD))
+	}
+	body := omap{{"gradient", gradientBody(points, mode)}}
+	// Check every match before changing any.
+	for _, l := range matches {
+		name := l.ID
+		if n := l.Metadata.name(); n != nil {
+			name = *n
+		}
+		if err := checkGradient(name, l.Gradient, points, mode); err != nil {
+			return err
+		}
+	}
+	reqs := make([]stagedRequest, len(matches))
+	rows := make([]row, len(matches))
+	for i, l := range matches {
+		reqs[i] = stagedRequest{Kind: "light", Target: l.ID, Body: body}
+		rows[i] = resultRow("light", l.ID, l.Metadata.name(), true, nil, body, nil)
+	}
+	if _, err := senderFor(ci, conn)(reqs); err != nil {
+		return err
+	}
+	st.Done = true
+	return emitResult(out, p.OutputSchema, rows)
+}

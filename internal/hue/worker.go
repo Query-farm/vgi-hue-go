@@ -23,19 +23,18 @@ func NewWorker(opts ...vgi.WorkerOption) *vgi.Worker {
 		vgi.WithTransactionHooks(transactionHooks()),
 	}
 	w := vgi.NewWorker(append(base, opts...)...)
-	// The lights scan is listed so DuckDB knows it supports projection
-	// pushdown, which the rowid virtual column (and so UPDATE) requires.
-	w.RegisterTable(vgi.AsTableFunction[DoneState](scanFn{lightsInv}))
-	for _, inv := range inventories[1:] {
-		w.RegisterTableUnlisted(vgi.AsTableFunction[DoneState](scanFn{inv}))
-	}
-	// lights carries its UpdateFunction (lights_update), registered with it.
+	// Each table registers its scan Function (lights_scan, ...) and lights its
+	// UpdateFunction (lights_update). Protocol 3.3 lists them as table_only, so
+	// DuckDB has their capabilities (projection pushdown for rowid / UPDATE)
+	// without exposing them as SQL functions; registering a scan here with
+	// RegisterTable would make it a public SQL function again.
 	for _, inv := range inventories {
 		w.RegisterCatalogTable("main", inv.catalogTable())
 	}
 	w.RegisterTable(vgi.AsTableFunction[DoneState](setLightFn{}))
 	w.RegisterTable(vgi.AsTableFunction[DoneState](setRoomFn{}))
 	w.RegisterTable(vgi.AsTableFunction[DoneState](recallSceneFn{}))
+	w.RegisterTable(vgi.AsTableFunction[DoneState](setGradientFn{}))
 	w.RegisterTableInOut(vgi.AsTableInOutFunction[NoState](setLightsFn{}))
 	return w
 }

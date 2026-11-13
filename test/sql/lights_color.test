@@ -1,0 +1,443 @@
+# name: test/sql/lights_color.test
+# description: xy colours, gradients and effects on hue.main.lights, and set_gradient, against the mock bridge
+# group: [hue]
+#
+# Named to sort after hue.test: over the launch transport DuckDB keeps the
+# first-started worker, and hue.test's discovery test needs that worker to
+# have been started with the current mock's discovery URL.
+
+require vgi
+
+require-env HUE_WORKER
+
+require-env HUE_MOCK_BRIDGE
+
+statement ok
+ATTACH 'hue' (TYPE vgi, LOCATION '{HUE_WORKER}', bridge '{HUE_MOCK_BRIDGE}', app_key 'test-key');
+
+statement ok
+ATTACH 'hue' AS tx (TYPE vgi, LOCATION '{HUE_WORKER}', bridge '{HUE_MOCK_BRIDGE}', app_key 'test-key', transactional true);
+
+# ------------------------------------------------------------------- reads
+
+# Only the strip has a gradient; colour lights have effects, white ones neither.
+query TTTTT
+SELECT name, gradient_hex IS NULL, gradient_mode, gradient_points_capable, effect FROM hue.main.lights ORDER BY name;
+----
+Desk lamp	true	NULL	NULL	no_effect
+Hallway strip	false	interpolated_palette	5	no_effect
+Kitchen ceiling	true	NULL	NULL	NULL
+Kitchen pendant	true	NULL	NULL	NULL
+Sofa lamp	true	NULL	NULL	no_effect
+
+query TTI
+SELECT gradient_hex, gradient_xy, gradient_pixel_count FROM hue.main.lights WHERE light_id = 'l-strip';
+----
+[#ff0000, #00ff00, #0000ff]	[{'x': 0.7006, 'y': 0.2993}, {'x': 0.1724, 'y': 0.7468}, {'x': 0.1355, 'y': 0.0399}]	10
+
+query T
+SELECT typeof(gradient_xy) FROM hue.main.lights WHERE light_id = 'l-strip';
+----
+STRUCT(x DOUBLE, y DOUBLE)[]
+
+# --------------------------------------------------------------- xy colour
+
+# Both coordinates: sent as is, and RETURNING shows the requested xy.
+query TRR
+UPDATE hue.main.lights SET color_x = 0.3, color_y = 0.6 WHERE light_id = 'l-sofa' RETURNING color_mode, color_x, color_y;
+----
+xy	0.3	0.6
+
+query TRR
+SELECT color_mode, color_x, color_y FROM hue.main.lights WHERE light_id = 'l-sofa';
+----
+xy	0.3	0.6
+
+# One coordinate: the other keeps the light's current value.
+statement ok
+UPDATE hue.main.lights SET color_y = 0.35 WHERE light_id = 'l-sofa';
+
+query RR
+SELECT color_x, color_y FROM hue.main.lights WHERE light_id = 'l-sofa';
+----
+0.3	0.35
+
+# The Desk lamp is in colour-temperature mode: an xy switches it to xy.
+query TRRI
+UPDATE hue.main.lights SET color_x = 0.45 WHERE light_id = 'l-desk' RETURNING color_mode, color_x, color_y, color_temperature_kelvin;
+----
+xy	0.45	0.38	NULL
+
+query T
+SELECT color_mode FROM hue.main.lights WHERE light_id = 'l-desk';
+----
+xy
+
+# RETURNING sends every column; unchanged ones are not SET (no conflict).
+query TI
+UPDATE hue.main.lights SET color_temperature_kelvin = 2700 WHERE light_id = 'l-desk' RETURNING color_mode, color_temperature_kelvin;
+----
+color_temperature	2703
+
+statement error
+UPDATE hue.main.lights SET color_hex = '#ff0000', color_x = 0.2 WHERE light_id = 'l-sofa';
+----
+set either color_hex or color_x/color_y, not both
+
+statement error
+UPDATE hue.main.lights SET color_x = 1.5 WHERE light_id = 'l-sofa';
+----
+color_x must be 0–1, got 1.5
+
+statement error
+UPDATE hue.main.lights SET color_y = -0.1 WHERE light_id = 'l-sofa';
+----
+color_y must be 0–1, got -0.1
+
+statement error
+UPDATE hue.main.lights SET color_x = 0.3, color_y = 0.3 WHERE light_id = 'l-pendant';
+----
+light 'Kitchen pendant' does not support color
+
+# Nothing was sent by the refused statements.
+query RR
+SELECT color_x, color_y FROM hue.main.lights WHERE light_id = 'l-sofa';
+----
+0.3	0.35
+
+# --------------------------------------------------------------- gradients
+
+query TT
+UPDATE hue.main.lights SET gradient_hex = ['#0000ff', '#ff0000'] WHERE light_id = 'l-strip' RETURNING gradient_hex, gradient_mode;
+----
+[#0000ff, #ff0000]	interpolated_palette
+
+query TT
+SELECT gradient_hex, gradient_xy FROM hue.main.lights WHERE light_id = 'l-strip';
+----
+[#0000ff, #ff0000]	[{'x': 0.1355, 'y': 0.0399}, {'x': 0.7006, 'y': 0.2993}]
+
+# The bridge sets the colour to the first gradient point: RETURNING says so,
+# and a re-read matches.
+query TRRTT
+UPDATE hue.main.lights SET gradient_xy = [{'x': 0.2, 'y': 0.3}, {'x': 0.4, 'y': 0.5}] WHERE light_id = 'l-strip'
+RETURNING color_mode, color_x, color_y, color_hex, color_temperature_kelvin;
+----
+xy	0.2	0.3	#7ce4ff	NULL
+
+query TRRTT
+SELECT color_mode, color_x, color_y, color_hex, color_temperature_kelvin FROM hue.main.lights WHERE light_id = 'l-strip';
+----
+xy	0.2	0.3	#7ce4ff	NULL
+
+query TT
+UPDATE hue.main.lights SET gradient_xy = [{'x': 0.2, 'y': 0.3}, {'x': 0.4, 'y': 0.5}, {'x': 0.5, 'y': 0.4}], gradient_mode = 'segmented_palette'
+WHERE light_id = 'l-strip' RETURNING gradient_xy, gradient_mode;
+----
+[{'x': 0.2, 'y': 0.3}, {'x': 0.4, 'y': 0.5}, {'x': 0.5, 'y': 0.4}]	segmented_palette
+
+# A mode change alone keeps the points.
+statement ok
+UPDATE hue.main.lights SET gradient_mode = 'random_pixelated' WHERE light_id = 'l-strip';
+
+query TT
+SELECT gradient_xy, gradient_mode FROM hue.main.lights WHERE light_id = 'l-strip';
+----
+[{'x': 0.2, 'y': 0.3}, {'x': 0.4, 'y': 0.5}, {'x': 0.5, 'y': 0.4}]	random_pixelated
+
+statement error
+UPDATE hue.main.lights SET gradient_hex = ['#ff0000', '#ff0000', '#ff0000', '#ff0000', '#ff0000', '#ff0000'] WHERE light_id = 'l-strip';
+----
+light 'Hallway strip' takes 2–5 gradient points, got 6
+
+# The bridge refuses a gradient of fewer than 2 points; so does the worker,
+# before sending anything.
+statement error
+UPDATE hue.main.lights SET gradient_hex = ['#ff0000'] WHERE light_id = 'l-strip';
+----
+light 'Hallway strip' takes 2–5 gradient points, got 1
+
+statement error
+UPDATE hue.main.lights SET gradient_xy = [{'x': 0.2, 'y': 0.3}] WHERE light_id = 'l-strip';
+----
+light 'Hallway strip' takes 2–5 gradient points, got 1
+
+statement error
+UPDATE hue.main.lights SET gradient_hex = [] WHERE light_id = 'l-strip';
+----
+takes 2–5 gradient points, got 0
+
+query T
+SELECT gradient_xy FROM hue.main.lights WHERE light_id = 'l-strip';
+----
+[{'x': 0.2, 'y': 0.3}, {'x': 0.4, 'y': 0.5}, {'x': 0.5, 'y': 0.4}]
+
+statement error
+UPDATE hue.main.lights SET gradient_mode = 'swirl' WHERE light_id = 'l-strip';
+----
+invalid gradient_mode 'swirl' for light 'Hallway strip'; allowed: interpolated_palette, interpolated_palette_mirrored, random_pixelated, segmented_palette
+
+statement error
+UPDATE hue.main.lights SET gradient_hex = ['#ff0000'] WHERE light_id = 'l-sofa';
+----
+light 'Sofa lamp' does not support gradients
+
+statement error
+UPDATE hue.main.lights SET gradient_hex = ['#ff0000'], color_hex = '#00ff00' WHERE light_id = 'l-strip';
+----
+set either a gradient or a single colour (color_hex, color_x/color_y, color_temperature_kelvin), not both
+
+statement error
+UPDATE hue.main.lights SET gradient_mode = 'segmented_palette', color_x = 0.25 WHERE light_id = 'l-strip';
+----
+set either a gradient or a single colour
+
+statement error
+UPDATE hue.main.lights SET gradient_hex = ['#ff0000'], gradient_xy = [{'x': 0.2, 'y': 0.3}] WHERE light_id = 'l-strip';
+----
+set either gradient_hex or gradient_xy, not both
+
+statement error
+UPDATE hue.main.lights SET gradient_hex = ['#ff0000', NULL] WHERE light_id = 'l-strip';
+----
+gradient points must not be NULL
+
+statement error
+UPDATE hue.main.lights SET gradient_xy = [{'x': 1.5, 'y': 0.3}] WHERE light_id = 'l-strip';
+----
+gradient x and y must be 0–1, got (1.5, 0.3)
+
+statement error
+UPDATE hue.main.lights SET gradient_hex = ['chartreuse-ish'] WHERE light_id = 'l-strip';
+----
+invalid color 'chartreuse-ish'
+
+# None of the refused statements reached the bridge.
+query T
+SELECT gradient_mode FROM hue.main.lights WHERE light_id = 'l-strip';
+----
+random_pixelated
+
+# A single colour on a gradient light drops its gradient (as the bridge does).
+query TT
+UPDATE hue.main.lights SET color_hex = '#00ff00' WHERE light_id = 'l-strip' RETURNING color_hex, gradient_hex;
+----
+#00ff00	[]
+
+query T
+SELECT gradient_hex FROM hue.main.lights WHERE light_id = 'l-strip';
+----
+[]
+
+# With no gradient left, a mode on its own has no points to re-send: refused
+# before anything is sent.
+statement error
+UPDATE hue.main.lights SET gradient_mode = 'segmented_palette' WHERE light_id = 'l-strip';
+----
+light 'Hallway strip' has no gradient to change the mode of; set gradient_hex or gradient_xy too
+
+query TT
+SELECT gradient_hex, gradient_mode FROM hue.main.lights WHERE light_id = 'l-strip';
+----
+[]	random_pixelated
+
+# ----------------------------------------------------------------- effects
+
+query T
+UPDATE hue.main.lights SET effect = 'candle' WHERE light_id = 'l-sofa' RETURNING effect;
+----
+candle
+
+query T
+SELECT effect FROM hue.main.lights WHERE light_id = 'l-sofa';
+----
+candle
+
+statement ok
+UPDATE hue.main.lights SET effect = 'no_effect' WHERE light_id = 'l-sofa';
+
+query T
+SELECT effect FROM hue.main.lights WHERE light_id = 'l-sofa';
+----
+no_effect
+
+statement error
+UPDATE hue.main.lights SET effect = 'disco' WHERE light_id = 'l-sofa';
+----
+invalid effect 'disco' for light 'Sofa lamp'; allowed: no_effect, candle, fire, prism, sparkle, opal, glisten
+
+statement error
+UPDATE hue.main.lights SET effect = 'candle' WHERE light_id = 'l-pendant';
+----
+light 'Kitchen pendant' does not support effects
+
+statement error
+UPDATE hue.main.lights SET effect = NULL WHERE light_id = 'l-sofa';
+----
+cannot SET effect = NULL
+
+# ------------------------------------------------------------ set_gradient
+
+query TTTTTTT
+SELECT * FROM hue.main.set_gradient('hallway strip', ['#ff0000', '#00ff00', '#0000ff'], mode := 'interpolated_palette_mirrored');
+----
+light	l-strip	Hallway strip	true	NULL	{"gradient":{"points":[{"color":{"xy":{"x":0.7006,"y":0.2993}}},{"color":{"xy":{"x":0.1724,"y":0.7468}}},{"color":{"xy":{"x":0.1355,"y":0.0399}}}],"mode":"interpolated_palette_mirrored"}}	NULL
+
+query TT
+SELECT gradient_hex, gradient_mode FROM hue.main.lights WHERE light_id = 'l-strip';
+----
+[#ff0000, #00ff00, #0000ff]	interpolated_palette_mirrored
+
+# By id, with the default mode.
+query T
+SELECT request FROM hue.main.set_gradient('l-strip', ['red', '#0000ff']);
+----
+{"gradient":{"points":[{"color":{"xy":{"x":0.7006,"y":0.2993}}},{"color":{"xy":{"x":0.1355,"y":0.0399}}}],"mode":"interpolated_palette"}}
+
+query T
+SELECT gradient_mode FROM hue.main.lights WHERE light_id = 'l-strip';
+----
+interpolated_palette
+
+statement error
+SELECT * FROM hue.main.set_gradient('Sofa lamp', ['#ff0000']);
+----
+light 'Sofa lamp' does not support gradients
+
+statement error
+SELECT * FROM hue.main.set_gradient('Hallway strip', ['#ff0000', '#ff0000', '#ff0000', '#ff0000', '#ff0000', '#ff0000']);
+----
+light 'Hallway strip' takes 2–5 gradient points, got 6
+
+statement error
+SELECT * FROM hue.main.set_gradient('Hallway strip', ['#ff0000']);
+----
+light 'Hallway strip' takes 2–5 gradient points, got 1
+
+# Nothing was sent by the refused calls.
+query T
+SELECT gradient_hex FROM hue.main.lights WHERE light_id = 'l-strip';
+----
+[#ff0000, #0000ff]
+
+statement error
+SELECT * FROM hue.main.set_gradient('Hallway strip', ['#ff0000', '#00ff00'], mode := 'swirl');
+----
+invalid gradient_mode 'swirl' for light 'Hallway strip'
+
+statement error
+SELECT * FROM hue.main.set_gradient('Hallway strip', []::VARCHAR[]);
+----
+set_gradient needs at least two colours
+
+statement error
+SELECT * FROM hue.main.set_gradient('Hallway strip', NULL::VARCHAR[]);
+----
+set_gradient needs at least two colours
+
+statement error
+SELECT * FROM hue.main.set_gradient('Hallway strip', ['#ff0000', NULL]);
+----
+gradient points must not be NULL
+
+statement error
+SELECT * FROM hue.main.set_gradient('No such strip', ['#ff0000']);
+----
+no light with id or name 'No such strip'
+
+# ------------------------------------------------------------ transactions
+
+# COMMIT: staged until COMMIT, visible inside the transaction meanwhile.
+statement ok
+BEGIN;
+
+statement ok
+UPDATE tx.main.lights SET gradient_hex = ['#00ff00', '#0000ff'] WHERE light_id = 'l-strip';
+
+# A mode change alone builds on the staged points.
+statement ok
+UPDATE tx.main.lights SET gradient_mode = 'segmented_palette' WHERE light_id = 'l-strip';
+
+query TT
+SELECT gradient_hex, gradient_mode FROM tx.main.lights WHERE light_id = 'l-strip';
+----
+[#00ff00, #0000ff]	segmented_palette
+
+query TT
+SELECT gradient_hex, gradient_mode FROM hue.main.lights WHERE light_id = 'l-strip';
+----
+[#ff0000, #0000ff]	interpolated_palette
+
+statement ok
+COMMIT;
+
+query TT
+SELECT gradient_hex, gradient_mode FROM hue.main.lights WHERE light_id = 'l-strip';
+----
+[#00ff00, #0000ff]	segmented_palette
+
+# A staged single colour clears the gradient as the transaction sees it, so a
+# mode on its own is refused there too (and the bridge keeps its gradient).
+statement ok
+BEGIN;
+
+statement ok
+UPDATE tx.main.lights SET color_hex = '#ff0000' WHERE light_id = 'l-strip';
+
+statement error
+UPDATE tx.main.lights SET gradient_mode = 'random_pixelated' WHERE light_id = 'l-strip';
+----
+light 'Hallway strip' has no gradient to change the mode of; set gradient_hex or gradient_xy too
+
+statement ok
+ROLLBACK;
+
+query TT
+SELECT gradient_hex, gradient_mode FROM hue.main.lights WHERE light_id = 'l-strip';
+----
+[#00ff00, #0000ff]	segmented_palette
+
+# ROLLBACK: a staged set_gradient and effect never reach the bridge.
+statement ok
+BEGIN;
+
+query TT
+SELECT name, ok FROM tx.main.set_gradient('Hallway strip', ['#ff0000', '#00ff00']);
+----
+Hallway strip	true
+
+statement ok
+UPDATE tx.main.lights SET effect = 'fire' WHERE light_id = 'l-strip';
+
+query TT
+SELECT gradient_hex, effect FROM tx.main.lights WHERE light_id = 'l-strip';
+----
+[#ff0000, #00ff00]	fire
+
+statement ok
+ROLLBACK;
+
+query TT
+SELECT gradient_hex, effect FROM hue.main.lights WHERE light_id = 'l-strip';
+----
+[#00ff00, #0000ff]	no_effect
+
+# An xy colour stages and commits too.
+statement ok
+BEGIN;
+
+statement ok
+UPDATE tx.main.lights SET color_x = 0.25, color_y = 0.25 WHERE light_id = 'l-sofa';
+
+query RR
+SELECT color_x, color_y FROM hue.main.lights WHERE light_id = 'l-sofa';
+----
+0.3	0.35
+
+statement ok
+COMMIT;
+
+query RR
+SELECT color_x, color_y FROM hue.main.lights WHERE light_id = 'l-sofa';
+----
+0.25	0.25

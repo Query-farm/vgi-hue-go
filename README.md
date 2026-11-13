@@ -87,6 +87,76 @@ FROM items i JOIN 'sales.parquet' s ON s.item_id = i.id;
 SELECT customer, hue.main.greet(customer, 'formal') FROM read_csv('customers.csv');
 ```
 
+## Colours: hex or CIE xy
+
+`hue.main.lights` reports a light's colour twice: `color_hex` (an approximate
+`'#rrggbb'` at full brightness) and `color_x`/`color_y` (the CIE 1931
+chromaticity the bridge stores, 0–1). Both are writable:
+
+```sql
+-- '#rrggbb' (or 'red', 'blue', ...): converted to xy by the worker.
+UPDATE hue.main.lights SET color_hex = '#ff8000' WHERE name = 'Sofa lamp';
+
+-- xy is sent as is, no hex round trip. SET only one coordinate and the
+-- other keeps the light's current value.
+UPDATE hue.main.lights SET color_x = 0.3, color_y = 0.6 WHERE name = 'Sofa lamp';
+UPDATE hue.main.lights SET color_y = 0.35 WHERE name = 'Sofa lamp';
+```
+
+Setting a colour switches `color_mode` to `'xy'`. `RETURNING` (and reads inside
+a transaction) show the xy you asked for; the bridge may clamp it to the lamp's
+gamut, so a later read can differ slightly. The worker refuses, before sending
+anything: `color_hex` together with `color_x`/`color_y` (`set either color_hex or
+color_x/color_y, not both`), a coordinate outside 0–1, and xy on a light without
+colour (`light 'Kitchen pendant' does not support color`).
+
+## Gradients
+
+Gradient lights (lightstrips, Play bars, ...) light several colours at once.
+Their rows carry `gradient_hex VARCHAR[]` and `gradient_xy STRUCT(x DOUBLE, y
+DOUBLE)[]` (the same points), `gradient_mode`, `gradient_points_capable` and
+`gradient_pixel_count`; for other lights these are NULL.
+
+```sql
+SELECT name, gradient_hex, gradient_mode, gradient_points_capable
+FROM hue.main.lights WHERE gradient_hex IS NOT NULL;
+
+UPDATE hue.main.lights SET gradient_hex = ['#ff0000', '#ffff00', '#0000ff'] WHERE name = 'Hallway strip';
+UPDATE hue.main.lights SET gradient_xy = [{'x': 0.2, 'y': 0.3}, {'x': 0.5, 'y': 0.4}],
+                           gradient_mode = 'segmented_palette'
+WHERE name = 'Hallway strip';
+-- A mode on its own re-sends the current points with the new mode (refused when
+-- the light has no gradient, e.g. after a single colour replaced it).
+UPDATE hue.main.lights SET gradient_mode = 'interpolated_palette_mirrored' WHERE name = 'Hallway strip';
+
+-- Or with a function (light id or name, like set_light):
+SELECT ok, request FROM hue.main.set_gradient('Hallway strip', ['#ff0000', '#00ff00'], mode := 'random_pixelated');
+```
+
+Modes are whatever the light lists (usually `interpolated_palette`,
+`interpolated_palette_mirrored`, `random_pixelated`, `segmented_palette`). A
+gradient takes 2 to `gradient_points_capable` points (the bridge refuses fewer), none NULL, each 0–1. A
+gradient and a single colour (`color_hex`, `color_x`/`color_y`,
+`color_temperature_kelvin`) cannot be set in one statement, nor `gradient_hex`
+and `gradient_xy`. Setting a single colour on a gradient light replaces the
+gradient: `gradient_hex` reads `[]` afterwards. Setting a gradient sets the
+light's colour (`color_x`/`color_y`, `color_hex`, `color_mode` 'xy') to its first point.
+
+## Effects
+
+`effect` is the light's running dynamic effect (`'candle'`, `'fire'`, `'prism'`,
+...), `'no_effect'` when none, and NULL for lights without effects.
+
+```sql
+UPDATE hue.main.lights SET effect = 'candle' WHERE name = 'Sofa lamp';
+UPDATE hue.main.lights SET effect = 'no_effect' WHERE name = 'Sofa lamp';  -- stop it
+```
+
+An effect the light does not list is refused with the allowed values. In a
+transactional attach (`transactional true`), colour, gradient, effect and
+`set_gradient` changes are staged like every other light change and sent at
+COMMIT (ROLLBACK discards them).
+
 ## Project layout
 
 ```

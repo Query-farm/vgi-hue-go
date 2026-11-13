@@ -13,9 +13,21 @@ Home layout
                "Living room sensor" (motion sensor, disabled: its readings are
                stale, as a real bridge keeps them), "Hue tap dial switch"
                (battery only; its buttons are not read)
-* Hallway:     "Hallway sensor" (motion sensor), "Front door" (contact sensor)
+* Hallway:     "Hallway sensor" (motion sensor), "Front door" (contact sensor),
+               "Hallway strip" (gradient lightstrip, off: 3 points red/green/blue,
+               points_capable 5, pixel_count 10, the four gradient modes)
 * Zone "Downstairs": Kitchen ceiling + Sofa lamp
 * Scenes: Relax (Kitchen), Bright (Kitchen), Relax (Living room)
+* Colour lights (Sofa lamp, Desk lamp, Hallway strip) carry a gamut and
+  'effects' (no_effect, candle, fire, prism, sparkle, opal, glisten).
+
+Light PUTs are validated like a real bridge, before anything is applied:
+colour, colour temperature, gradient and effects only on lights that have
+them, colour xy in 0-1, ``points`` required in a gradient write, at least 2 and at most
+points_capable of them, known gradient modes and effects. A refusal is HTTP
+400 with a description. A colour or colour temperature on a gradient light
+empties its gradient points, and a gradient write sets the light's colour xy
+to its first point, as a real bridge does.
 
 Endpoints: ``GET /clip/v2/resource/<type>``, ``PUT /clip/v2/resource/<type>/<id>``
 for light, grouped_light and scene, ``GET /health``, and for discovery tests:
@@ -28,6 +40,10 @@ Switches (environment):
 * ``MOCK_FLAKY=1``: the first GET of every path answers 429 + Retry-After: 0.
 * ``MOCK_GROUP_DELAY_MS``: apply grouped_light commands to the bulbs only after
   this delay, as a real bridge relays them over Zigbee one bulb at a time.
+* ``MOCK_PUT_DELAY_MS``: answer every light PUT only after this delay (default 0),
+  to measure how a bulk UPDATE overlaps its requests. Other requests are not delayed.
+* ``MOCK_EXTRA_LIGHTS``: add this many extra colour lights to the Living room
+  (default 0), named "Extra 1", "Extra 2", ..., for bulk-update timing tests.
 
 Usage: ``python3 test/mock_bridge/server.py`` prints ``PORT:<n>`` once listening.
 """
@@ -41,6 +57,7 @@ import json
 import os
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_KEY = os.environ.get("MOCK_APP_KEY", "test-key")
@@ -73,8 +90,20 @@ def light(lid: str, did: str, name: str, on: bool, bri: float, mirek: int | None
     if mirek is not None or xy is not None:
         out["color_temperature"] = {"mirek": mirek, "mirek_valid": mirek is not None}
     if xy is not None:
-        out["color"] = {"xy": {"x": xy[0], "y": xy[1]}}
+        out["color"] = {"xy": {"x": xy[0], "y": xy[1]}, "gamut_type": "C", "gamut": GAMUT_C}
+        out["effects"] = {"status": "no_effect", "status_values": EFFECTS, "effect_values": EFFECTS}
     return out
+
+
+# Colour lights' gamut (Hue gamut C) and dynamic effects, as a real bridge lists them.
+GAMUT_C = {"red": {"x": 0.6915, "y": 0.3083}, "green": {"x": 0.17, "y": 0.7}, "blue": {"x": 0.1532, "y": 0.0475}}
+EFFECTS = ["no_effect", "candle", "fire", "prism", "sparkle", "opal", "glisten"]
+GRADIENT_MODES = ["interpolated_palette", "interpolated_palette_mirrored", "random_pixelated", "segmented_palette"]
+
+
+def gradient(points: list[tuple[float, float]]) -> dict:
+    return {"points": [{"color": {"xy": {"x": x, "y": y}}} for x, y in points], "mode": "interpolated_palette",
+            "points_capable": 5, "mode_values": GRADIENT_MODES, "pixel_count": 10}
 
 
 def sensor_services(
@@ -105,24 +134,33 @@ def initial_state() -> dict[str, list[dict]]:
         device("d-door", "Front door", "SOC001", "Hue secure contact sensor", []),
         device("d-lsensor", "Living room sensor", "SML001", "Hue motion sensor", []),
         device("d-dial", "Hue tap dial switch", "RDM002", "Hue tap dial switch", [ref("dial-button-1", "button")]),
+        device("d-strip", "Hallway strip", "LCX004", "Hue gradient lightstrip", [ref("l-strip", "light")]),
     ]
     lights = [
         light("l-ceiling", "d-ceiling", "Kitchen ceiling", True, 80.0, 370, None, "ceiling_round"),
         light("l-pendant", "d-pendant", "Kitchen pendant", True, 50.0, None, None, "pendant_round"),
         light("l-sofa", "d-sofa", "Sofa lamp", False, 30.0, None, (0.5, 0.4), "floor_shade"),
         light("l-desk", "d-desk", "Desk lamp", True, 100.0, 250, (0.4, 0.38), "table_shade"),
+        # A gradient lightstrip: red, green and blue points.
+        light("l-strip", "d-strip", "Hallway strip", False, 60.0, None, (0.3, 0.3), "hue_lightstrip"),
     ]
+    lights[-1]["gradient"] = gradient([(0.7006, 0.2993), (0.1724, 0.7468), (0.1355, 0.0399)])
     # The ceiling light is white ambiance: colour temperature but no xy colour.
     lights[0].pop("color", None)
+    extra = int(os.environ.get("MOCK_EXTRA_LIGHTS") or 0)
+    for i in range(1, extra + 1):
+        devices.append(device(f"d-extra{i}", f"Extra {i}", "LCA001", "Hue color lamp", [ref(f"l-extra{i}", "light")]))
+        lights.append(light(f"l-extra{i}", f"d-extra{i}", f"Extra {i}", False, 50.0, None, (0.4, 0.4), "classic_bulb"))
     rooms = [
         {"id": "r-kitchen", "type": "room", "metadata": {"name": "Kitchen", "archetype": "kitchen"},
          "children": [ref("d-ceiling", "device"), ref("d-pendant", "device"), ref("d-ksensor", "device")],
          "services": [ref("gl-kitchen", "grouped_light")]},
         {"id": "r-living", "type": "room", "metadata": {"name": "Living room", "archetype": "living_room"},
-         "children": [ref("d-sofa", "device"), ref("d-desk", "device"), ref("d-lsensor", "device"), ref("d-dial", "device")],
+         "children": [ref("d-sofa", "device"), ref("d-desk", "device"), ref("d-lsensor", "device"), ref("d-dial", "device")]
+         + [ref(f"d-extra{i}", "device") for i in range(1, extra + 1)],
          "services": [ref("gl-living", "grouped_light")]},
         {"id": "r-hallway", "type": "room", "metadata": {"name": "Hallway", "archetype": "hallway"},
-         "children": [ref("d-hsensor", "device"), ref("d-door", "device")],
+         "children": [ref("d-hsensor", "device"), ref("d-door", "device"), ref("d-strip", "device")],
          "services": [ref("gl-hallway", "grouped_light")]},
     ]
     zones = [
@@ -199,12 +237,54 @@ def grouped_lights() -> list[dict]:
     return out
 
 
+def in01(v: object) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 1
+
+
+def valid_xy(xy: object) -> bool:
+    return isinstance(xy, dict) and in01(xy.get("x")) and in01(xy.get("y"))
+
+
+def check_light(l: dict, body: dict) -> str | None:
+    """Validate a light PUT body as a real bridge does; return an error description or None."""
+    name = l["metadata"]["name"]
+    if "color" in body and "color" not in l:
+        return f"device ({name}) does not support color"
+    if "color_temperature" in body and "color_temperature" not in l:
+        return f"device ({name}) does not support color_temperature"
+    if "gradient" in body:
+        if "gradient" not in l:
+            return f"device ({name}) does not support gradient"
+        g = body["gradient"]
+        if not isinstance(g, dict) or not isinstance(g.get("points"), list):
+            return "gradient.points is required"
+        if len(g["points"]) < 2:
+            return "invalid attribute value (.gradient.points)"  # a real bridge needs at least 2 points
+        cap = l["gradient"]["points_capable"]
+        if len(g["points"]) > cap:
+            return f"gradient.points: at most {cap} points allowed"
+        for p in g["points"]:
+            if not isinstance(p, dict) or not isinstance(p.get("color"), dict) or not valid_xy(p["color"].get("xy")):
+                return "gradient.points: invalid color"
+        if "mode" in g and g["mode"] not in l["gradient"]["mode_values"]:
+            return f"gradient.mode: invalid value {g['mode']}"
+    if "effects" in body:
+        if "effects" not in l:
+            return f"device ({name}) does not support effects"
+        e = body["effects"]
+        effect = e.get("effect") if isinstance(e, dict) else e
+        if effect not in l["effects"]["effect_values"]:
+            return f"effects.effect: invalid value {effect}"
+    if "color" in body and not (isinstance(body["color"], dict) and valid_xy(body["color"].get("xy"))):
+        return "color.xy: invalid value"
+    return None
+
+
 def apply_light(l: dict, body: dict) -> str | None:
     """Apply a light PUT body; return an error description or None."""
-    if "color" in body and "color" not in l:
-        return f"device ({l['metadata']['name']}) does not support color"
-    if "color_temperature" in body and "color_temperature" not in l:
-        return f"device ({l['metadata']['name']}) does not support color_temperature"
+    err = check_light(l, body)
+    if err:
+        return err
     if "metadata" in body and "name" in body["metadata"]:
         name = str(body["metadata"]["name"])
         if not 1 <= len(name) <= 32:
@@ -220,8 +300,20 @@ def apply_light(l: dict, body: dict) -> str | None:
     if "color_temperature" in body:
         l["color_temperature"] = {"mirek": body["color_temperature"]["mirek"], "mirek_valid": True}
     if "color" in body:
-        l["color"] = {"xy": body["color"]["xy"]}
+        l["color"]["xy"] = body["color"]["xy"]
         l["color_temperature"] = {"mirek": None, "mirek_valid": False}
+    if ("color" in body or "color_temperature" in body) and "gradient" in l:
+        l["gradient"]["points"] = []  # a single colour or white drops the gradient
+    if "gradient" in body:
+        l["gradient"]["points"] = body["gradient"]["points"]
+        if "color" in l:  # as a real bridge does: the colour becomes the first gradient point
+            l["color"]["xy"] = dict(body["gradient"]["points"][0]["color"]["xy"])
+            if "color_temperature" in l:
+                l["color_temperature"] = {"mirek": None, "mirek_valid": False}
+        if "mode" in body["gradient"]:
+            l["gradient"]["mode"] = body["gradient"]["mode"]
+    if "effects" in body:
+        l["effects"]["status"] = body["effects"]["effect"]
     return None
 
 
@@ -300,6 +392,9 @@ class Handler(BaseHTTPRequestHandler):
             self._error(405, "method not allowed")
             return
         rtype, rid = parts
+        put_delay_ms = int(os.environ.get("MOCK_PUT_DELAY_MS") or 0)
+        if put_delay_ms and rtype == "light":
+            time.sleep(put_delay_ms / 1000)  # outside LOCK: concurrent PUTs overlap
         with LOCK:
             if rtype == "light":
                 target = find("light", rid)
@@ -319,7 +414,8 @@ class Handler(BaseHTTPRequestHandler):
                     with LOCK:
                         for l in members:
                             # A group command skips capabilities a member lacks, as the bridge does.
-                            apply_light(l, {k: v for k, v in body.items() if k not in ("color", "color_temperature") or k in l})
+                            apply_light(l, {k: v for k, v in body.items()
+                                            if k not in ("color", "color_temperature", "gradient", "effects") or k in l})
 
                 delay_ms = int(os.environ.get("MOCK_GROUP_DELAY_MS") or 0)
                 if delay_ms:

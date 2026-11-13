@@ -121,7 +121,13 @@ func (*orders) Process(ctx context.Context, params *vgi.ProcessParams, state *or
 	}
 	where, args := "id > ?", []any{state.LastID}
 	if pf := params.CurrentPushdownFilters; pf != nil {
-		if clause, values := pf.ToSQL(quoteIdent, "?"); clause != "" {
+		// ToSQLExact never widens: DuckDB drops every pushed predicate from its
+		// plan, so a clause that kept extra rows would return them to the user.
+		clause, values, err := pf.ToSQLExact(quoteIdent, "?")
+		if err != nil {
+			return fmt.Errorf("orders: cannot push filter into SQLite: %w", err)
+		}
+		if clause != "" {
 			where += " AND " + clause
 			args = append(args, values...)
 		}

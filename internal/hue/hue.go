@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ const (
 	maxAttempts         = 4
 	lightCommandGap     = 100 * time.Millisecond
 	groupCommandGap     = 1000 * time.Millisecond
+	maxInFlightRequests = 4 // PUTs sendAll keeps in flight at once (starts are still paced)
 	maxRetryAfterSleep  = 10 * time.Second
 	userAgent           = "vgi-hue-worker/" + Version
 	retryBackoffBaseDur = 250 * time.Millisecond
@@ -88,9 +90,19 @@ func firstNonEmpty(vals ...string) string {
 }
 
 // The bridge's certificate is signed by Signify's private CA: skip verification.
+// The client is shared by every goroutine (http.Client is safe for concurrent
+// use). Keep-alive connections are kept for the pipelined PUTs, and the
+// connection count per bridge is capped: sendAll keeps at most
+// maxInFlightRequests PUTs in flight, and the inventory reads fan out a few
+// GETs at once.
 var httpClient = &http.Client{
-	Timeout:   requestTimeout,
-	Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec // see header
+	Timeout: requestTimeout,
+	Transport: &http.Transport{
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // see header
+		MaxIdleConnsPerHost: maxInFlightRequests,
+		MaxConnsPerHost:     2 * maxInFlightRequests,
+		IdleConnTimeout:     30 * time.Second,
+	},
 }
 
 type hueEnvelope struct {
@@ -210,12 +222,47 @@ type hueLight struct {
 	ColorTemperature *struct {
 		Mirek *float64 `json:"mirek"`
 	} `json:"color_temperature"`
+	// Color is present only on lights that can show a colour (it carries
+	// the gamut); White and white-ambiance lights have none.
 	Color *struct {
-		XY *struct {
-			X float64 `json:"x"`
-			Y float64 `json:"y"`
-		} `json:"xy"`
+		XY        *xyPoint `json:"xy"`
+		GamutType *string  `json:"gamut_type"`
 	} `json:"color"`
+	// Gradient is present only on gradient lights (lightstrips, Play bars...).
+	Gradient *hueGradient `json:"gradient"`
+	// Effects is present only on lights with dynamic effects (candle, fire...).
+	Effects *struct {
+		Status       *string  `json:"status"`
+		EffectValues []string `json:"effect_values"`
+	} `json:"effects"`
+}
+
+// xyPoint is a CIE 1931 chromaticity.
+type xyPoint struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
+// hueGradient is a light's CLIP v2 gradient object.
+type hueGradient struct {
+	Points []struct {
+		Color struct {
+			XY xyPoint `json:"xy"`
+		} `json:"color"`
+	} `json:"points"`
+	Mode          *string  `json:"mode"`
+	ModeValues    []string `json:"mode_values"`
+	PointsCapable *int32   `json:"points_capable"`
+	PixelCount    *int32   `json:"pixel_count"`
+}
+
+// xys lists the gradient's points.
+func (g *hueGradient) xys() []xyPoint {
+	out := make([]xyPoint, len(g.Points))
+	for i, p := range g.Points {
+		out[i] = p.Color.XY
+	}
+	return out
 }
 
 type hueDevice struct {
@@ -585,6 +632,82 @@ func buildStateBody(c lightChange) (omap, error) {
 	return body, nil
 }
 
+// xyBody is a CLIP v2 colour object, {"xy":{"x":..,"y":..}}.
+func xyBody(p xyPoint) omap { return omap{{"xy", omap{{"x", p.X}, {"y", p.Y}}}} }
+
+// gradientBody is a CLIP v2 gradient object: {"points":[{"color":{"xy":..}},...],
+// "mode": m}. An empty mode is left out, so the light keeps its own.
+func gradientBody(points []xyPoint, mode string) omap {
+	pts := make([]any, len(points))
+	for i, p := range points {
+		pts[i] = omap{{"color", xyBody(p)}}
+	}
+	g := omap{{"points", pts}}
+	if mode != "" {
+		g = g.set("mode", mode)
+	}
+	return g
+}
+
+// errNullPoint is the error for a NULL gradient point or coordinate.
+var errNullPoint = &HueError{Msg: "gradient points must not be NULL"}
+
+// hexesToXY converts '#rrggbb' (or basic colour name) gradient points to xy.
+func hexesToXY(colors []any) ([]xyPoint, error) {
+	out := make([]xyPoint, 0, len(colors))
+	for _, c := range colors {
+		s, ok := c.(string)
+		if !ok {
+			return nil, errNullPoint
+		}
+		rgb, err := parseColor(s)
+		if err != nil {
+			return nil, err
+		}
+		x, y := rgbToXY(rgb)
+		out = append(out, xyPoint{x, y})
+	}
+	return out, nil
+}
+
+func in01(v float64) bool { return v >= 0 && v <= 1 && !math.IsNaN(v) }
+
+// checkGradient validates a gradient write's values for the light named
+// name; g is the light's gradient capability (nil: not a gradient light).
+// mode "" keeps the light's mode.
+func checkGradient(name string, g *hueGradient, points []xyPoint, mode string) error {
+	if g == nil {
+		return hueErr("light '%s' does not support gradients", name)
+	}
+	for _, p := range points {
+		if !in01(p.X) || !in01(p.Y) {
+			return hueErr("gradient x and y must be 0–1, got (%s, %s)", jsNum(p.X), jsNum(p.Y))
+		}
+	}
+	capable := int32(5)
+	if g.PointsCapable != nil {
+		capable = *g.PointsCapable
+	}
+	if len(points) < 2 || int32(len(points)) > capable {
+		return hueErr("light '%s' takes 2–%d gradient points, got %d", name, capable, len(points))
+	}
+	if mode != "" && !slices.Contains(g.ModeValues, mode) {
+		return hueErr("invalid gradient_mode '%s' for light '%s'; allowed: %s", mode, name, strings.Join(g.ModeValues, ", "))
+	}
+	return nil
+}
+
+// checkEffect validates an effect for the light named name (values nil: no effects).
+func checkEffect(name string, values []string, effect string) error {
+	if values == nil {
+		return hueErr("light '%s' does not support effects", name)
+	}
+	if !slices.Contains(values, effect) {
+		return hueErr("invalid effect '%s' for light '%s'; allowed: %s", effect, name, strings.Join(values, ", "))
+	}
+	return nil
+}
+
 func jsNum(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
 
 var (
@@ -592,7 +715,10 @@ var (
 	lastCommandAt = map[string]time.Time{}
 )
 
-// pace spaces commands of one kind so a bulk update stays inside Hue's limits.
+// pace spaces the start of commands of one kind so a bulk update stays inside
+// Hue's limits (about 10 light commands and 1 group command per second). It
+// returns once the caller may start its request; callers in other goroutines
+// queue on paceMu, so each gets its own slot.
 func pace(kind string) {
 	gap := lightCommandGap
 	if kind != "light" {
