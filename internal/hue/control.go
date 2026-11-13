@@ -164,9 +164,9 @@ var _ vgi.TypedTableFunc[DoneState] = setLightFn{}
 
 func (setLightFn) Name() string { return "set_light" }
 func (setLightFn) Metadata() vgi.FunctionMetadata {
-	return vgi.FunctionMetadata{Description: "Turn one light on or off, or set its brightness, colour temperature or colour",
+	return withExamples("set_light", vgi.FunctionMetadata{Description: "Turn one light on or off, or set its brightness, colour temperature or colour",
 		Stability: vgi.StabilityVolatile, Tags: controlT("Set Light", "hue, light control, dim",
-			"Change one light (by id or case-insensitive name). Named state arguments: power, brightness, kelvin, color, transition_ms.")}
+			"Change one light (by id or case-insensitive name). Named state arguments: power, brightness, kelvin, color, transition_ms.")})
 }
 func (setLightFn) ArgumentSpecs() []vgi.ArgSpec {
 	return append([]vgi.ArgSpec{{Name: "light", Position: 0, ArrowType: "varchar", ArrowDataType: utf8T, IsConst: true,
@@ -290,9 +290,9 @@ var _ vgi.TypedTableFunc[DoneState] = setRoomFn{}
 
 func (setRoomFn) Name() string { return "set_room" }
 func (setRoomFn) Metadata() vgi.FunctionMetadata {
-	return vgi.FunctionMetadata{Description: "Change every light in a room or zone at once: on/off, brightness, colour temperature or colour",
+	return withExamples("set_room", vgi.FunctionMetadata{Description: "Change every light in a room or zone at once: on/off, brightness, colour temperature or colour",
 		Stability: vgi.StabilityVolatile, Tags: controlT("Set Room", "hue, room, zone, group",
-			"Change every light in one room or zone with a single command. wait_ms waits for the bulbs and reports it in settled.")}
+			"Change every light in one room or zone with a single command. wait_ms waits for the bulbs and reports it in settled.")})
 }
 func (setRoomFn) ArgumentSpecs() []vgi.ArgSpec {
 	specs := append([]vgi.ArgSpec{{Name: "room", Position: 0, ArrowType: "varchar", ArrowDataType: utf8T, IsConst: true,
@@ -404,9 +404,9 @@ var _ vgi.TypedTableFunc[DoneState] = recallSceneFn{}
 
 func (recallSceneFn) Name() string { return "recall_scene" }
 func (recallSceneFn) Metadata() vgi.FunctionMetadata {
-	return vgi.FunctionMetadata{Description: "Activate a Hue scene by id, or by name optionally narrowed to a room",
+	return withExamples("recall_scene", vgi.FunctionMetadata{Description: "Activate a Hue scene by id, or by name optionally narrowed to a room",
 		Stability: vgi.StabilityVolatile, Tags: controlT("Recall Scene", "hue, scene, preset",
-			"Activate a scene by id or name; pass room := '...' when the name repeats across rooms.")}
+			"Activate a scene by id or name; pass room := '...' when the name repeats across rooms.")})
 }
 func (recallSceneFn) ArgumentSpecs() []vgi.ArgSpec {
 	return []vgi.ArgSpec{
@@ -490,10 +490,10 @@ var _ vgi.TypedTableInOutFunc[NoState] = setLightsFn{}
 
 func (setLightsFn) Name() string { return "set_lights" }
 func (setLightsFn) Metadata() vgi.FunctionMetadata {
-	return vgi.FunctionMetadata{Description: "Apply one change to every light listed by a query (its light_id column)",
+	return withExamples("set_lights", vgi.FunctionMetadata{Description: "Apply one change to every light listed by a query (its light_id column)",
 		Stability: vgi.StabilityVolatile, Tags: controlT("Set Lights (bulk)", "hue, bulk, many lights",
 			"Apply the same change to every light a subquery returns (it needs a light_id column; name is echoed). "+
-				"Per-light failures are reported in that light's row.")}
+				"Per-light failures are reported in that light's row.")})
 }
 func (setLightsFn) ArgumentSpecs() []vgi.ArgSpec {
 	return append([]vgi.ArgSpec{{Name: "data", Position: 0, ArrowType: "table",
@@ -614,8 +614,8 @@ func (setGradientFn) Metadata() vgi.FunctionMetadata {
 			"with mode := 'interpolated_palette' (default), 'interpolated_palette_mirrored', 'random_pixelated' or 'segmented_palette'. "+
 			"The light must have a gradient (gradient_points_capable in hue.main.lights is not NULL); 2 to gradient_points_capable colours. "+
 			"The same as UPDATE hue.main.lights SET gradient_hex = [...], gradient_mode = '...'.")
-	return vgi.FunctionMetadata{Description: "Set the gradient of a gradient light (lightstrip, Play bar...) from a list of '#rrggbb' colours",
-		Stability: vgi.StabilityVolatile, Tags: tags}
+	return withExamples("set_gradient", vgi.FunctionMetadata{Description: "Set the gradient of a gradient light (lightstrip, Play bar...) from a list of '#rrggbb' colours",
+		Stability: vgi.StabilityVolatile, Tags: tags})
 }
 func (setGradientFn) ArgumentSpecs() []vgi.ArgSpec { return setGradientArgSpecs }
 func (setGradientFn) OnBind(p *vgi.BindParams) (*vgi.BindResponse, error) {

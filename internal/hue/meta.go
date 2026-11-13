@@ -105,44 +105,45 @@ type exampleQuery struct {
 	SQL         string `json:"sql"`
 }
 
-const catalogDocLLM = "An example VGI worker generated from the Query.Farm starter template. It shows the three " +
-	"shapes most workers need: a vectorized scalar function (`greet`, with a one- and two-argument " +
-	"overload), a deterministic table function with a named default argument (`sequence_table`), " +
-	"and a table function that pages through a REST API with retries and an optional bearer token " +
-	"taken from a DuckDB secret or an environment variable (`fetch_items`). Replace these with " +
-	"your own functions; keep the metadata complete so agents can discover and call them."
+const catalogDocLLM = "Read and control Philips Hue smart lighting from SQL through a Hue bridge on the local network " +
+	"(CLIP v2 API). Connect by passing the application key as the ATTACH option `app_key`; the bridge " +
+	"is found automatically on the local network, or set the `bridge` option to its address or bridge " +
+	"id (the worker's HUE_APP_KEY and HUE_BRIDGE environment variables are fallbacks). Concepts: " +
+	"every light belongs to a physical device; devices are placed in a room; a zone is any grouping " +
+	"of individual lights; a scene is a saved lighting state for one room or zone; a sensor is a " +
+	"service on a device (a Hue motion sensor also reports temperature, ambient light and battery). " +
+	"Inventory is exposed as tables that always read live bridge state; the lights table also accepts " +
+	"UPDATE (power, brightness, white temperature, colour as hex or CIE xy, gradient points and " +
+	"mode on gradient lights, effects, and name). Changes can also be made with table functions " +
+	"that send a command when the query runs and return one row per change, matching targets by " +
+	"id or case-insensitive name; brightness is a percentage and white temperature is in Kelvin. " +
+	"They switch real lights in someone's home, so call them only when the user asks. With the ATTACH " +
+	"option `transactional true`, changes inside BEGIN ... COMMIT are staged and sent together at " +
+	"COMMIT (ROLLBACK discards them)."
 
 // CatalogDocMD is the catalog's long human-facing description (also its comment).
-const CatalogDocMD = "# VGI hue worker\n\n" +
-	"**An example [VGI](https://query.farm/vgi) worker that brings custom functions into DuckDB " +
-	"SQL.** It was generated from the Query.Farm starter template and is meant to be renamed and " +
-	"rewritten: every function here demonstrates one pattern you will reuse.\n\n" +
-	"- `greet(name)` and `greet(name, style)`: a vectorized scalar with an overload and a " +
-	"constrained constant argument.\n" +
-	"- `sequence_table(count, step := 1)`: a deterministic table function that streams its " +
-	"output in batches.\n" +
-	"- `fetch_items(base_url, page_size := 100)`: wraps a paginated REST API, retrying politely " +
-	"and reading a bearer token from a DuckDB secret or the environment.\n\n" +
-	"The worker speaks Apache Arrow to DuckDB over stdin/stdout, a Unix socket, or HTTP, so the " +
-	"same code runs as a local subprocess or a hosted service. See the " +
-	"[VGI documentation](https://query.farm/vgi/docs/) to learn more."
+const CatalogDocMD = "# Philips Hue for DuckDB\n\n**Query and control your Hue lights with SQL.** This [VGI](https://query.farm/vgi) " +
+	"worker talks to a Hue bridge on your network: read the live state of every light, room, zone, " +
+	"scene and sensor as tables, join it with anything else in DuckDB, and switch lights from a " +
+	"query.\n\nAttach it with an application key (created by pressing the bridge's link button); " +
+	"the bridge itself is discovered on your network. Pass the key with `getenv(...)` to keep it " +
+	"out of your SQL; DuckDB redacts it either way."
 
-const schemaDocLLM = "The `main` schema holds the starter template's example functions, one per common worker " +
-	"pattern. `greet(name)` and `greet(name, style)` are vectorized scalars: use them inside a " +
-	"projection or predicate, one result per row; `style` is a constant that must be 'casual' or " +
-	"'formal'. `sequence_table(count, step := 1)` is a deterministic table function that returns " +
-	"`count` rows of `(n, squared)`; use it for demos, tests, and as a template for generators. " +
-	"`fetch_items(base_url, page_size := 100)` reads every item from a paginated JSON REST API as " +
-	"`(id, name, category, price)` rows, streaming one page per batch, retrying rate-limited " +
-	"requests, and authenticating with a `hue_api` DuckDB secret or the `HUE_API_TOKEN` " +
-	"environment variable. Scalars cannot take named arguments; table functions can."
+const schemaDocLLM = "Everything for the attached Hue bridge lives in `main`. The inventory tables take no arguments " +
+	"and reflect the bridge at query time; filter and join them like any table. The lights table " +
+	"also accepts UPDATE of `is_on`, `brightness`, `color_temperature_kelvin`, `color_hex`, `color_x`/`color_y`, " +
+	"`gradient_hex`/`gradient_xy`, `gradient_mode`, `effect` and `name`; `set_gradient(light, colors, " +
+	"mode := ...)` sets a gradient light's points. The control functions take a target (id or case-insensitive " +
+	"name) plus named, optional state arguments, at least one of which is required: `power := true|false` " +
+	"(on/off; `on` is a SQL keyword), `brightness := 0..100` (above 0 implies on, 0 turns off), " +
+	"`kelvin := 2000..6500` or `color := '#rrggbb'` (one or the other) and `transition_ms` (fade " +
+	"time). Each returns rows of `target_type`, `target_id`, `name`, `ok`, `error`, `request`, `settled`. " +
+	"For many lights at once, feed a query that has a `light_id` column into the bulk function."
 
 // SchemaDocMD is the main schema's human-facing description (also its comment).
-const SchemaDocMD = "## main\n\n" +
-	"The starter template's example functions, one per common worker pattern.\n\n" +
-	"- **Scalars** answer one question per row and slot into a projection or predicate.\n" +
-	"- **Table functions** return sets of rows, streamed to DuckDB in Arrow batches.\n" +
-	"- **REST readers** page through an HTTP API and authenticate with a DuckDB secret."
+const SchemaDocMD = "## main\n\nEvery table and function for the attached Hue bridge.\n\n- **Inventory tables** " +
+	"show what exists and its live state.\n- **Control functions** change a light, a room or zone, " +
+	"or recall a scene, and return what they sent."
 
 // agentTask is one public analyst task for `vgi-lint simulate`.
 type agentTask struct {
@@ -152,11 +153,16 @@ type agentTask struct {
 
 // agentTestTasks are graded privately by vgi-agent-tests.yaml.
 var agentTestTasks = []agentTask{
-	{Name: "formal_greeting", Prompt: "Using the hue worker, greet the name 'Grace' formally."},
-	{Name: "sum_of_squares", Prompt: "Using the hue worker, what is the sum of the squared column for the first 10 rows " +
-		"of the sequence with the default step?"},
-	{Name: "stepped_sequence", Prompt: "List the n values of a 4-row sequence that steps by 5, in ascending order."},
-	{Name: "items_per_category", Prompt: "The items API is running at https://vgi-starter-api.query-farm.services/v1. How many items does it have in each category?"},
+	{Name: "lights_on_per_room", Prompt: "Using the hue worker, how many lights are on in each room?"},
+	{Name: "active_scenes", Prompt: "Using the hue worker, which scene is currently active in each room?"},
+	{Name: "biggest_room", Prompt: "Using the hue worker, which room has the most lights?"},
+	{Name: "warmest_room", Prompt: "Using the hue worker, which room has the highest temperature sensor reading?"},
+	{Name: "kitchen_off", Prompt: "Using the hue worker, turn off all the lights in the Kitchen."},
+	{Name: "dim_sofa", Prompt: "Using the hue worker, set the Sofa lamp to 30% brightness."},
+	{Name: "rename_desk_lamp", Prompt: "Using the hue worker, rename the light called Desk lamp to Reading lamp."},
+	{Name: "relax_living_room", Prompt: "Using the hue worker, activate the Relax scene in the Living room."},
+	{Name: "strip_gradient", Prompt: "Using the hue worker, make the Hallway strip a gradient from red to blue."},
+	{Name: "warm_white_everywhere", Prompt: "Using the hue worker, set every light that supports colour temperature to 2700 K."},
 }
 
 // CatalogTags are the catalog-level discovery tags.
@@ -170,7 +176,7 @@ var CatalogTags = map[string]string{
 	"vgi.license":            "0BSD",
 	"vgi.author":             "Query.Farm",
 	"vgi.copyright":          "Copyright 2026 Query.Farm LLC",
-	"vgi.keywords":           keywordsArray("vgi, duckdb, starter template, example worker, rest api, table function"),
+	"vgi.keywords":           keywordsArray("philips hue, smart home, lights, home automation, sensors, duckdb, vgi"),
 	"vgi.support_contact":    SourceURL + "/issues",
 	"vgi.support_policy_url": SourceURL + "#support",
 	// Public analyst tasks for `vgi-lint simulate`; private graders live in vgi-agent-tests.yaml.
@@ -181,8 +187,8 @@ var CatalogTags = map[string]string{
 func schemaTags(allExamples []exampleQuery) map[string]string {
 	return map[string]string{
 		"vgi.title":           "Hue Functions",
-		"domain":              "examples",
-		"vgi.keywords":        keywordsArray("greeting, sequence, generator, rest api, pagination"),
+		"domain":              "smart home",
+		"vgi.keywords":        keywordsArray("hue, lights, rooms, scenes, sensors, light control"),
 		"vgi.doc_llm":         schemaDocLLM,
 		"vgi.doc_md":          SchemaDocMD,
 		"vgi.categories":      mustJSON(SchemaCategories),

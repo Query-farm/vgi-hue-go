@@ -87,17 +87,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go build -o bin/vgi-hue-worker ./cmd/vgi-hue-worker
-      - name: Read fail_on from vgi-lint.toml
-        id: lintcfg
-        run: python3 -c 'import tomllib; print("fail_on=" + tomllib.load(open("vgi-lint.toml", "rb")).get("fail_on", "error"))' >> "$GITHUB_OUTPUT"
-      - uses: Query-farm/vgi-lint-check@v2
+      - uses: astral-sh/setup-uv@v6
         with:
-          location: ${{ github.workspace }}/bin/vgi-hue-worker
-          # Set in vgi-lint.toml, so local runs and CI agree.
-          fail-on: ${{ steps.lintcfg.outputs.fail_on }}
-          # Set to false if your examples need real credentials or network access.
-          execute: true
+          python-version: "3.13"
+      # Lints against the mock Hue bridge (ci/lint.sh) with a fake app key, so the
+      # tables return rows and examples execute without a real bridge.
+      # fail_on comes from vgi-lint.toml, so local runs and CI agree.
+      - run: make lint-explain
 
   docker:
     name: Docker image smoke test

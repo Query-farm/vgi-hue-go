@@ -74,7 +74,16 @@ func ensureDB() error {
 	if err := db.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, ordersDB)
+	if err := os.Rename(tmp, ordersDB); err != nil {
+		// Another process won the race (Windows refuses to replace a file
+		// that is open); its copy is identical.
+		_ = os.Remove(tmp)
+		if _, statErr := os.Stat(ordersDB); statErr == nil {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // ordersCursor is the keyset pagination cursor: the last id emitted.

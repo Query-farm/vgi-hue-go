@@ -5,8 +5,6 @@ import (
 	"github.com/Query-farm/vgi-go/vgi"
 )
 
-func allExamples() []exampleQuery { return nil }
-
 // NewWorker builds the worker: one catalog, one main schema.
 func NewWorker(opts ...vgi.WorkerOption) *vgi.Worker {
 	sourceURL, version := SourceURL, Version

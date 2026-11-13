@@ -44,23 +44,31 @@ var (
 	txDBErr  error
 )
 
+// txSchema is the staged-request store's schema.
+const txSchema = `CREATE TABLE IF NOT EXISTS staged (seq INTEGER PRIMARY KEY AUTOINCREMENT,
+	tx TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, body TEXT NOT NULL, created REAL NOT NULL);
+	CREATE INDEX IF NOT EXISTS staged_tx ON staged (tx, seq)`
+
+// txDir is where the staged-request store lives: HUE_TX_DIR, else a per-user
+// directory (the user cache dir: %LocalAppData% on Windows), so users never
+// share one file and every process of one user resolves the same path.
+func txDir() string {
+	if dir := os.Getenv("HUE_TX_DIR"); dir != "" {
+		return dir
+	}
+	if base, err := os.UserCacheDir(); err == nil {
+		return filepath.Join(base, "vgi-hue")
+	}
+	return filepath.Join(os.TempDir(), fmt.Sprintf("vgi-hue-%d", os.Getuid()))
+}
+
 func openTxDB() (*sql.DB, error) {
 	txDBOnce.Do(func() {
-		dir := os.Getenv("HUE_TX_DIR")
-		if dir == "" {
-			dir = filepath.Join(os.TempDir(), "vgi-hue")
-		}
-		if txDBErr = os.MkdirAll(dir, 0o755); txDBErr != nil {
+		dir := txDir()
+		if txDBErr = os.MkdirAll(dir, 0o700); txDBErr != nil {
 			return
 		}
-		txDB, txDBErr = sql.Open("sqlite", "file:"+filepath.Join(dir, "transactions-go.db")+
-			"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
-		if txDBErr != nil {
-			return
-		}
-		_, txDBErr = txDB.Exec(`CREATE TABLE IF NOT EXISTS staged (seq INTEGER PRIMARY KEY AUTOINCREMENT,
-			tx TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, body TEXT NOT NULL, created REAL NOT NULL);
-			CREATE INDEX IF NOT EXISTS staged_tx ON staged (tx, seq)`)
+		txDB, txDBErr = openSharedSQLite(filepath.Join(dir, "transactions-go.db"), txSchema)
 	})
 	return txDB, txDBErr
 }
