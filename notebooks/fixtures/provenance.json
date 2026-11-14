@@ -1,0 +1,8 @@
+{
+  "kind": "Unmodified repository synthetic stateful mock bridge, no real devices",
+  "repository": "https://github.com/Query-farm/vgi-hue-go",
+  "revision": "c8edf307c8d5bceae8d66c5d2184ff7dec2f5097",
+  "source": "test/mock_bridge/server.py",
+  "file": "hue_bridge.py",
+  "sha256": "4a415012951bc3851e1c0e55ffd61e49333f2ac28a47c4c8b96a021aaeaca746"
+}

@@ -397,3 +397,7 @@ has the conventions for coding agents.
 ## License
 
 [BSD Zero Clause License](LICENSE) (0BSD).
+
+## Executed notebook
+
+[Preview, roll back and commit a brightness cap](notebooks/README.md) through the real worker against a disposable synthetic Hue bridge, with no physical-device actions.
