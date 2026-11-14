@@ -108,3 +108,8 @@ is deterministic; real bridges may fail, apply updates asynchronously or clamp
 values. These results do not prove atomic physical-device behavior. No live-device
 validation was performed. See the pinned [worker documentation](https://github.com/Query-farm/vgi-hue-go/blob/c8edf307c8d5bceae8d66c5d2184ff7dec2f5097/README.md)
 and [STANDARD.md](STANDARD.md).
+
+The native Haybarn connection uses an empty temporary SQL secret directory with
+persistent secrets disabled. Both attachments use only explicit dummy bridge
+credentials. Assertions confirm an empty SQL secret inventory before attachment
+and at cleanup. Existing saved credentials are neither loaded nor modified.
