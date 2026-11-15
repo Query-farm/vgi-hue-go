@@ -10,10 +10,10 @@ func NewWorker(opts ...vgi.WorkerOption) *vgi.Worker {
 	sourceURL, version := SourceURL, Version
 	base := []vgi.WorkerOption{
 		vgi.WithCatalogName(CatalogName),
-		vgi.WithCatalogComment(CatalogDocMD),
+		vgi.WithCatalogComment(CatalogComment),
 		vgi.WithCatalogTags(CatalogTags),
 		vgi.WithCatalogInfo(vgi.CatalogInfo{SourceURL: &sourceURL, ImplementationVersion: &version}),
-		vgi.WithSchemaComments(map[string]string{"main": SchemaDocMD}),
+		vgi.WithSchemaComments(map[string]string{"main": SchemaComment}),
 		vgi.WithSchemaTags(map[string]map[string]string{"main": schemaTags(allExamples())}),
 		vgi.WithAttachOptions(attachOptionSpecs()...),
 		// Also decides supports_transactions per attach (transactional).

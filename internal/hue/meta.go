@@ -121,13 +121,23 @@ const catalogDocLLM = "Read and control Philips Hue smart lighting from SQL thro
 	"option `transactional true`, changes inside BEGIN ... COMMIT are staged and sent together at " +
 	"COMMIT (ROLLBACK discards them)."
 
-// CatalogDocMD is the catalog's long human-facing description (also its comment).
+// CatalogDocMD is the catalog's long human-facing description (vgi.doc_md).
 const CatalogDocMD = "# Philips Hue for DuckDB\n\n**Query and control your Hue lights with SQL.** This [VGI](https://query.farm/vgi) " +
 	"worker talks to a Hue bridge on your network: read the live state of every light, room, zone, " +
 	"scene and sensor as tables, join it with anything else in DuckDB, and switch lights from a " +
-	"query.\n\nAttach it with an application key (created by pressing the bridge's link button); " +
+	"query. It uses the bridge's [CLIP v2 API](https://developers.meethue.com/develop/hue-api-v2/).\n\n" +
+	"Attach it with an application key (created by pressing the bridge's link button); " +
 	"the bridge itself is discovered on your network. Pass the key with `getenv(...)` to keep it " +
 	"out of your SQL; DuckDB redacts it either way."
+
+// CatalogComment is the one-line description directories show: one plain
+// paragraph, no Markdown, no function list. The long overview is CatalogDocMD.
+const CatalogComment = "Philips Hue smart lighting in DuckDB: read the live state of the lights, rooms, " +
+	"zones, scenes and sensors on a Hue bridge as SQL tables, and switch lights from a query."
+
+// SchemaComment is the main schema's one-line comment.
+const SchemaComment = "Every table and function for the attached Hue bridge: inventory tables with " +
+	"live state, and control functions that change lights, rooms, zones and scenes."
 
 const schemaDocLLM = "Everything for the attached Hue bridge lives in `main`. The inventory tables take no arguments " +
 	"and reflect the bridge at query time; filter and join them like any table. The lights table " +
@@ -140,7 +150,7 @@ const schemaDocLLM = "Everything for the attached Hue bridge lives in `main`. Th
 	"time). Each returns rows of `target_type`, `target_id`, `name`, `ok`, `error`, `request`, `settled`. " +
 	"For many lights at once, feed a query that has a `light_id` column into the bulk function."
 
-// SchemaDocMD is the main schema's human-facing description (also its comment).
+// SchemaDocMD is the main schema's human-facing description (vgi.doc_md).
 const SchemaDocMD = "## main\n\nEvery table and function for the attached Hue bridge.\n\n- **Inventory tables** " +
 	"show what exists and its live state.\n- **Control functions** change a light, a room or zone, " +
 	"or recall a scene, and return what they sent."

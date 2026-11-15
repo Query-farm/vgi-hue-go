@@ -23,9 +23,12 @@ jobs:
           go-version: stable
       - uses: astral-sh/setup-uv@v6
       - name: Upgrade dependencies, keeping vgi-go on its pinned minor
+        # The minor comes from go.mod, so this never drifts behind a bump (a stale
+        # hard-coded pin once downgraded vgi-go to a release whose core package needs cgo).
         run: |
+          vgi_go_minor="$(go list -m -f '{{.Version}}' github.com/Query-farm/vgi-go | cut -d. -f1-2)"
           go get -u ./...
-          go get github.com/Query-farm/vgi-go@v0.39
+          go get "github.com/Query-farm/vgi-go@${vgi_go_minor}"
           go mod tidy
       - run: make lint test-unit
       - run: make test-sql-all
